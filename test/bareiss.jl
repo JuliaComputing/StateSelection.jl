@@ -1,6 +1,6 @@
 using SparseArrays
 using StateSelection
-import StateSelection: bareiss!, find_pivot_col, bareiss_update!, swaprows!
+import StateSelection.bareiss: bareiss!, find_pivot_col, bareiss_update!, swaprows!
 import Base: swapcols!
 
 function det_bareiss!(M)
