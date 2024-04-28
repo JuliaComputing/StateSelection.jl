@@ -1,8 +1,6 @@
 # StateSelection
 
 [![Build Status](https://github.com/JuliaComputing/StateSelection.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/JuliaComputing/StateSelection.jl/actions/workflows/CI.yml?query=branch%3Amain)
-[![Coverage](https://codecov.io/gh/JuliaComputing/StateSelection.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/JuliaComputing/StateSelection.jl)
-[![Coverage](https://coveralls.io/repos/github/JuliaComputing/StateSelection.jl/badge.svg?branch=main)](https://coveralls.io/github/JuliaComputing/StateSelection.jl?branch=main)
 
 This package implements *structural* transformations suitable
 of optimizing systems of (non-linear, ordinary differential, differential algebraic) equations for faster and more stable integration using a numerical solver. It is intended to serve as a common algorithmic core to a variety of downstream modeling systems, including [MTK](https://github.com/SciML/ModelingToolkit.jl), [DAECompiler](https://github.com/CedarEDA/DAECompiler.jl) and JuliaSimCompiler.
