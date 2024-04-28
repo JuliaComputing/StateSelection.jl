@@ -1,6 +1,6 @@
 name = "StateSelection"
 uuid = "64909d44-ed92-46a8-bbd9-f047dfbdc84b"
-version = "0.1.0-DEV"
+version = "0.1.0"
 authors = ["JuliaHub", "Inc. and other contributors"]
 
 [deps]
