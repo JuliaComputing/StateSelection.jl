@@ -24,13 +24,12 @@ We will consider a *system* to be the dictum of a list of variables and equation
 
 Then, the *PSS problem* is to find
 
-A. A (possibly empty) list of equations to differentiate
-B. The assignment of each variable (or their derivatives if such derivative occurs in a differentiated equation) to one of
-
-    i. A selected differential state
-    ii. An assignment to an equation (declaring the equation will be solved for this variable)
-    iii. An assignment to a linear-system of a list of equations
-    iv. An algebraic state
+1. A (possibly empty) list of equations to differentiate
+2. The assignment of each variable (or their derivatives if such derivative occurs in a differentiated equation) to one of
+    1. A selected differential state
+    2. An assignment to an equation (declaring the equation will be solved for this variable)
+    3. An assignment to a linear-system of a list of equations
+    4. An algebraic state
 
 Such that
 1. the dependency graph of variables (described further below) is acyclic
@@ -48,7 +47,7 @@ Solutions to the PSS problem are not unique and the chosen solution materially a
 
 # Detailed description of the transformation steps
 
-A. Structural Singularity Removal
+### Structural Singularity Removal
 
 This is a pre-pass that runs before pantelides. The primary objective of the pantelides algorithm is to ensure that the
 jacobian of the fundamental ODE system is non-singular at runtime. However, because pantelides is a structural algorithm,
@@ -59,15 +58,15 @@ However, fortunately, in such systems, the numerical singularity is static and a
 
 As such, this pre-pass applies a change of basis to the ILS to make the numerical rank-deficiency structurally apparent, allowing pantelides to properly differentiate the resulting equations.
 
-B. Patenlides algorithm (DAE only)
+### Patenlides algorithm (DAE only)
 
 The Pantelides algorithm is used for reduxing the differentiation index of the system to index 1 or 0, making it suitable for integration with a numerical integrator (such integrators are generally not capable of integrating higher-index DAE systems). This is accomplished by generating a list of equations to differentiate and adding these to the system.
 
-C. Dummy Derivatives (DAE only)
+### Dummy Derivatives (DAE only)
 
 The pantelides algorithm produces systems that are over-determined in their differential relations (the sum of the number of differential relations and algebraic relations needs to match the number of variables). As such, some of these differential relations need to be removed in order to make the system solvable. However, the choice of which relations to remove can radically affect the numerical properties of the system and thus the ease and stability of the resulting integration.
 
-D. Tearing
+### Tearing
 
 Tearing computes a (directed) dependency graph of equations (or dually variables). If this graph is fully connected and has no cycles, all output variables are uniquely determined given all input variables, so the system will have no algebraic states. In general however, this dependency graph may have cycles (referred to as *algebraic loops*). Such cycles are broken numerically by choosing one or more variables in the cycle as algebraic states and (at runtime) wrapping a non-linear solver around these variables. Again,
 the choice of algebraic states greatly affects the ease and stability of the resulting solve or integration.
