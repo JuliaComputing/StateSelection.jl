@@ -416,14 +416,15 @@ function construct_augmenting_path!(matching::Matching, g::BipartiteGraph, vsrc,
 end
 
 """
-    maximal_matching(g::BipartiteGraph, [srcfilter], [dstfilter])
+    maximal_matching(g::BipartiteGraph; [srcfilter], [dstfilter])
 
 For a bipartite graph `g`, construct a maximal matching of destination to source
 vertices, subject to the constraint that vertices for which `srcfilter` or `dstfilter`,
 return `false` may not be matched.
 """
-function maximal_matching(g::BipartiteGraph, srcfilter = vsrc -> true,
-        dstfilter = vdst -> true, ::Type{U} = Unassigned) where {U}
+function maximal_matching(g::BipartiteGraph, ::Type{U} = Unassigned;
+        srcfilter = vsrc -> true,
+        dstfilter = vdst -> true) where {U}
     matching = Matching{U}(max(nsrcs(g), ndsts(g)))
     foreach(Iterators.filter(srcfilter, 𝑠vertices(g))) do vsrc
         construct_augmenting_path!(matching, g, vsrc, dstfilter)

@@ -63,7 +63,8 @@ function check_consistency(state::TransformationState, orig_inputs)
 
     if neqs > 0 && !is_balanced
         varwhitelist = var_to_diff .== nothing
-        var_eq_matching = maximal_matching(graph, eq -> true, v -> varwhitelist[v]) # not assigned
+        var_eq_matching = maximal_matching(graph,
+            dstfilter = v -> varwhitelist[v]) # not assigned
         # Just use `error_reporting` to do conditional
         iseqs = n_highest_vars < neqs
         if iseqs

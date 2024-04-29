@@ -110,8 +110,8 @@ function pss_graph_modia!(structure::SystemStructure, maximal_top_matching, varl
                 if !isempty(remaining_vars)
                     remaining_eqs = setdiff(to_tear_eqs, assigned_eqs)
                     nlsolve_matching = maximal_matching(graph,
-                        Base.Fix2(in, remaining_eqs),
-                        Base.Fix2(in, remaining_vars))
+                        srcfilter=Base.Fix2(in, remaining_eqs),
+                        dstfilter=Base.Fix2(in, remaining_vars))
                     for var in remaining_vars
                         if nlsolve_matching[var] === unassigned &&
                            var_eq_matching[var] === unassigned

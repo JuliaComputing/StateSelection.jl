@@ -78,7 +78,9 @@ function tear_graph_modia(structure::SystemStructure, isder::F = nothing,
     # find them here [TODO: It would be good to have an explicit example of this.]
 
     @unpack graph, solvable_graph = structure
-    var_eq_matching = maximal_matching(graph, eqfilter, varfilter, U)
+    var_eq_matching = maximal_matching(graph, U,
+        srcfilter=eqfilter,
+        dstfilter=varfilter)
     var_eq_matching = complete(var_eq_matching,
         max(length(var_eq_matching),
             maximum(x -> x isa Int ? x : 0, var_eq_matching, init = 0)))
