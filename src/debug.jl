@@ -60,7 +60,6 @@ function Base.getindex(bgpm::SystemStructurePrintMatrix, i::Integer, j::Integer)
         match = unassigned
         if bgpm.var_eq_matching !== nothing && i - 1 <= length(bgpm.var_eq_matching)
             match = bgpm.var_eq_matching[i - 1]
-            isa(match, Union{Int, Unassigned}) || (match = true) # Selected Unknown
         end
         return BipartiteAdjacencyList(
             i - 1 <= ndsts(bgpm.bpg) ?
@@ -125,7 +124,11 @@ function Base.show(io::IO, mime::MIME"text/plain", ms::MatchedSystemStructure)
     printstyled(io, "Unsolvable", color = :light_black)
     print(io, " | ")
     printstyled(io, "(Unsolvable + Matched)", color = :magenta)
-    print(io, " | ")
-    printstyled(io, " ∫", color = :cyan)
-    printstyled(io, " SelectedState")
+    for T in Base.uniontypes(eltype(ms.var_eq_matching))
+        T in (Int, Unassigned) && continue
+        (symbol, label, color) = BipartiteGraphs.overview_label(T)
+        print(io, " | ")
+        printstyled(io, string(" ", symbol); color)
+        printstyled(io, string(" ", label))
+    end
 end

@@ -64,8 +64,8 @@ end
 
 function Base.show(io::IO, l::BipartiteAdjacencyListDiff)
     print(io,
-        LabelDiff(Label(l.new.match === true ? "∫ " : ""),
-            Label(l.old.match === true ? "∫ " : "")))
+        LabelDiff(Label(!isa(l.new.match, Union{Unassigned, Int}) ? string(overview_label(typeof(l.new.match))[1], " ") : ""),
+            Label(!isa(l.old.match, Union{Unassigned, Int}) ? string(overview_label(typeof(l.old.match))[1], " ") : "")))
     (l.new.match !== true && l.old.match !== true) && print(io, "  ")
 
     new_nonempty = isnothing(l.new.u) ? nothing : !isempty(l.new.u)

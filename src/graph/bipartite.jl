@@ -206,11 +206,13 @@ end
 struct BipartiteAdjacencyList
     u::Union{Vector{Int}, Nothing}
     highlight_u::Union{Set{Int}, Nothing}
-    match::Union{Int, Bool, Unassigned}
+    match # Int or Union{SelectedState, Unassigned}
 end
 function BipartiteAdjacencyList(u::Union{Vector{Int}, Nothing})
     BipartiteAdjacencyList(u, nothing, unassigned)
 end
+
+function overview_label end
 
 struct HighlightInt
     i::Int
@@ -229,8 +231,9 @@ function Base.show(io::IO, hi::HighlightInt)
 end
 
 function Base.show(io::IO, l::BipartiteAdjacencyList)
-    if l.match === true
-        printstyled(io, "∫ ", color = :cyan)
+    if !isa(l.match, Union{Int, Unassigned})
+        (label, _, color) = overview_label(typeof(l.match))
+        printstyled(io, string(label, " "); color)
     else
         printstyled(io, "  ")
     end
@@ -242,7 +245,7 @@ function Base.show(io::IO, l::BipartiteAdjacencyList)
         print(io, l.u)
     else
         match = l.match
-        isa(match, Bool) && (match = unassigned)
+        !isa(match, Int) && (match = unassigned)
         function choose_color(i)
             solvable = i in l.highlight_u
             matched = i == match
