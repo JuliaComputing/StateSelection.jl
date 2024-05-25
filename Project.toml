@@ -1,7 +1,7 @@
 name = "StateSelection"
 uuid = "64909d44-ed92-46a8-bbd9-f047dfbdc84b"
-version = "0.1.0"
 authors = ["JuliaHub", "Inc. and other contributors"]
+version = "0.1.0"
 
 [deps]
 DocStringExtensions = "ffbed154-4ef7-542d-bbb7-c09d3a79fcae"
@@ -12,7 +12,14 @@ Setfield = "efcf1570-3423-57d1-acb7-fd33fddbac46"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 UnPack = "3a884ed6-31ef-47d7-9d2a-63182c4928ed"
 
+[weakdeps]
+DeepDiffs = "ab62b9b5-e342-54a8-a765-a90f495de1a6"
+
+[extensions]
+StateSelectionDeepDiffsExt = "DeepDiffs"
+
 [compat]
+DeepDiffs = "1"
 DocStringExtensions = "0.9.3"
 FindFirstFunctions = "1.2.0"
 Graphs = "1.10.0"
@@ -21,12 +28,6 @@ Setfield = "1.1.1"
 SparseArrays = "1.11.0"
 UnPack = "1.0.2"
 julia = "1.9"
-
-[weakdeps]
-DeepDiffs = "ab62b9b5-e342-54a8-a765-a90f495de1a6"
-
-[extensions]
-StateSelectionDeepDiffsExt = "DeepDiffs"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
