@@ -213,6 +213,8 @@ function BipartiteAdjacencyList(u::Union{Vector{Int}, Nothing})
 end
 
 function overview_label end
+overview_label(::Type) = error("No label defined for this matching type")
+overview_label(x) = overview_label(typeof(x))
 
 struct HighlightInt
     i::Int
@@ -232,7 +234,7 @@ end
 
 function Base.show(io::IO, l::BipartiteAdjacencyList)
     if !isa(l.match, Union{Int, Unassigned})
-        (label, _, color) = overview_label(typeof(l.match))
+        (label, _, color) = overview_label(l.match)
         printstyled(io, string(label, " "); color)
     else
         printstyled(io, "  ")
