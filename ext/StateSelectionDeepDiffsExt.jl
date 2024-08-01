@@ -1,5 +1,6 @@
+module StateSelectionDeepDiffsExt
 
-using DeepDiffs, ModelingToolkit
+using DeepDiffs
 using StateSelection.BipartiteGraphs: Label,
                                        BipartiteAdjacencyList, unassigned,
                                        HighlightInt
@@ -48,7 +49,7 @@ BipartiteAdjacencyList's.
 
 # Example
 ```julia
-using ModelingToolkit, DeepDiffs
+using StateSelection, DeepDiffs
 
 old = BipartiteAdjacencyList(...)
 new = BipartiteAdjacencyList(...)
@@ -116,7 +117,7 @@ in git-style red/green highlighting.
 
 # Example
 ```julia
-using ModelingToolkit, DeepDiffs
+using StateSelection, DeepDiffs
 
 old = Label("before")
 new = Label("after")
@@ -145,7 +146,7 @@ A utility struct for displaying the difference between two
 
 # Example
 ```julia
-using ModelingToolkit, DeepDiffs
+using StateSelection, DeepDiffs
 
 old = SystemStructurePrintMatrix(...)
 new = SystemStructurePrintMatrix(...)
@@ -184,4 +185,6 @@ function DeepDiffs.deepdiff(old::Union{MatchedSystemStructure, SystemStructure},
     new_sspm = SystemStructurePrintMatrix(new)
     old_sspm = SystemStructurePrintMatrix(old)
     Base.print_matrix(stdout, SystemStructureDiffPrintMatrix(new_sspm, old_sspm))
+end
+
 end
