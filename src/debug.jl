@@ -73,6 +73,11 @@ function Base.getindex(bgpm::SystemStructurePrintMatrix, i::Integer, j::Integer)
     end
 end
 
+struct IncidenceMarker <: Number
+    active::Bool
+end
+Base.show(io::IO, inc::IncidenceMarker) = print(io, inc.active ? "x" : " ")
+
 function Base.show(io::IO, mime::MIME"text/plain", s::SystemStructure)
     @unpack graph, solvable_graph, var_to_diff, eq_to_diff = s
     if !get(io, :limit, true) || !get(io, :mtk_limit, true)
@@ -81,7 +86,7 @@ function Base.show(io::IO, mime::MIME"text/plain", s::SystemStructure)
             " variables\n")
         Base.print_matrix(io, SystemStructurePrintMatrix(s))
     else
-        S = incidence_matrix(s.graph, Num(Sym{Real}(:×)))
+        S = incidence_matrix(s.graph, IncidenceMarker(true))
         print(io, "Incidence matrix:")
         show(io, mime, S)
     end
