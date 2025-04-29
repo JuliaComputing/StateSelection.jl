@@ -29,7 +29,7 @@ end
 function Base.getindex(bgpm::SystemStructurePrintMatrix, i::Integer, j::Integer)
     checkbounds(bgpm, i, j)
     if i <= 1
-        return (Label.(("#", "∂ₜ", " ", "  eq", "", "#", "∂ₜ", " ", "  v")))[j]
+        return (Label.(("# eq", "∂ₜ", " ", " ", "", "# v", "∂ₜ", " ", " ")))[j]
     elseif j == 5
         colors = Base.text_colors
         return Label("|", :light_black)

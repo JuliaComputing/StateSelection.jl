@@ -28,8 +28,13 @@ function ascend_dg_all(xs, dg, level, maxlevel)
     return r
 end
 
-function pss_graph_modia!(structure::SystemStructure, maximal_top_matching, varlevel,
-        inv_varlevel, inv_eqlevel)
+struct DiffData
+    varlevel::Vector{Int}
+    inv_varlevel::Vector{Int}
+    inv_eqlevel::Vector{Int}
+end
+
+function pss_graph_modia!(structure::SystemStructure, maximal_top_matching, diff_data::Union{Nothing, DiffData}=nothing)
     @unpack eq_to_diff, var_to_diff, graph, solvable_graph = structure
 
     # var_eq_matching is a maximal matching on the top-differentiated variables.
@@ -47,8 +52,8 @@ function pss_graph_modia!(structure::SystemStructure, maximal_top_matching, varl
         eqs = [maximal_top_matching[var]
                for var in vars if maximal_top_matching[var] !== unassigned]
         isempty(eqs) && continue
-        maxeqlevel = maximum(map(x -> inv_eqlevel[x], eqs))
-        maxvarlevel = level = maximum(map(x -> inv_varlevel[x], vars))
+        maxeqlevel = diff_data === nothing ? 0 : maximum(map(x -> diff_data.inv_eqlevel[x], eqs))
+        maxvarlevel = level = diff_data === nothing ? 0 : maximum(map(x -> diff_data.inv_varlevel[x], vars))
         old_level_vars = ()
         ict = IncrementalCycleTracker(
             DiCMOBiGraph{true}(graph,
@@ -56,10 +61,10 @@ function pss_graph_modia!(structure::SystemStructure, maximal_top_matching, varl
             dir = :in)
 
         while level >= 0
-            to_tear_eqs_toplevel = filter(eq -> inv_eqlevel[eq] >= level, eqs)
+            to_tear_eqs_toplevel = level == 0 ? eqs : filter(eq -> diff_data.inv_eqlevel[eq] >= level, eqs)
             to_tear_eqs = ascend_dg(to_tear_eqs_toplevel, invview(eq_to_diff), level)
 
-            to_tear_vars_toplevel = filter(var -> inv_varlevel[var] >= level, vars)
+            to_tear_vars_toplevel = level == 0 ? vars : filter(var -> diff_data.inv_varlevel[var] >= level, vars)
             to_tear_vars = ascend_dg(to_tear_vars_toplevel, invview(var_to_diff), level)
 
             assigned_eqs = Int[]
@@ -163,8 +168,8 @@ function partial_state_selection_graph!(structure::SystemStructure, var_eq_match
     end
 
     var_eq_matching = pss_graph_modia!(structure,
-        complete(var_eq_matching), varlevel, inv_varlevel,
-        inv_eqlevel)
+        complete(var_eq_matching), DiffData(varlevel, inv_varlevel,
+        inv_eqlevel))
 
     var_eq_matching
 end

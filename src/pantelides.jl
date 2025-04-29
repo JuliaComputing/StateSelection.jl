@@ -15,12 +15,13 @@ case, there is one complicating condition:
 This function takes care of these complications are returns a boolean array
 for every variable, indicating whether it is considered "highest-differentiated".
 """
-function computed_highest_diff_variables(structure)
+function computed_highest_diff_variables(structure, diffvars::Union{BitVector, BitSet, Nothing}=nothing)
     @unpack graph, var_to_diff = structure
 
     nvars = length(var_to_diff)
     varwhitelist = falses(nvars)
     for var in 1:nvars
+        _canchoose(diffvars, var) || continue
         if var_to_diff[var] === nothing && !varwhitelist[var]
             # This variable is structurally highest-differentiated, but may not actually appear in the
             # system (complication 1 above). Ascend the differentiation graph to find the highest
@@ -49,6 +50,9 @@ function computed_highest_diff_variables(structure)
 
     return varwhitelist
 end
+_canchoose(diffvars::BitSet, var::Integer) = var in diffvars
+_canchoose(diffvars::BitVector, var::Integer) = diffvars[var]
+_canchoose(diffvars::Nothing, var::Integer) = true
 
 """
     pantelides!(state::TransformationState; kwargs...)
