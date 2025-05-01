@@ -8,6 +8,33 @@ function n_concrete_eqs(graph::BipartiteGraph)
     neqs = count(e -> !isempty(𝑠neighbors(graph, e)), 𝑠vertices(graph))
 end
 
+struct InvalidSystemException <: Exception
+    msg::String
+end
+function Base.showerror(io::IO, e::InvalidSystemException)
+    print(io, "InvalidSystemException: ", e.msg)
+end
+
+struct ExtraVariablesSystemException <: Exception
+    msg::String
+end
+function Base.showerror(io::IO, e::ExtraVariablesSystemException)
+    println(io, "ExtraVariablesSystemException: ", e.msg)
+    print(io,
+        "Note that the process of determining extra variables is a best-effort heuristic. " *
+        "The true extra variables are dependent on the model and may not be in this list.")
+end
+
+struct ExtraEquationsSystemException <: Exception
+    msg::String
+end
+function Base.showerror(io::IO, e::ExtraEquationsSystemException)
+    println(io, "ExtraEquationsSystemException: ", e.msg)
+    print(io,
+        "Note that the process of determining extra equations is a best-effort heuristic. " *
+        "The true extra equations are dependent on the model and may not be in this list.")
+end
+
 function error_reporting(state, bad_idxs, n_highest_vars, iseqs, orig_inputs)
     io = IOBuffer()
     neqs = n_concrete_eqs(state)

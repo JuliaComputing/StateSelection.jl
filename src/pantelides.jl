@@ -15,13 +15,13 @@ case, there is one complicating condition:
 This function takes care of these complications are returns a boolean array
 for every variable, indicating whether it is considered "highest-differentiated".
 """
-function computed_highest_diff_variables(structure, diffvars::Union{BitVector, BitSet, Nothing}=nothing)
+function computed_highest_diff_variables(structure, varfilter)
     @unpack graph, var_to_diff = structure
 
     nvars = length(var_to_diff)
     varwhitelist = falses(nvars)
     for var in 1:nvars
-        _canchoose(diffvars, var) || continue
+        varfilter(var) || continue
         if var_to_diff[var] === nothing && !varwhitelist[var]
             # This variable is structurally highest-differentiated, but may not actually appear in the
             # system (complication 1 above). Ascend the differentiation graph to find the highest
@@ -50,6 +50,10 @@ function computed_highest_diff_variables(structure, diffvars::Union{BitVector, B
 
     return varwhitelist
 end
+computed_highest_diff_variables(structure, diffvars::Union{BitVector, BitSet, Nothing}) =
+    computed_highest_diff_variables(structure, var->_canchoose(diffvars, var))
+computed_highest_diff_variables(structure, ::Nothing=nothing) =
+    computed_highest_diff_variables(structure, var->true)
 _canchoose(diffvars::BitSet, var::Integer) = var in diffvars
 _canchoose(diffvars::BitVector, var::Integer) = diffvars[var]
 _canchoose(diffvars::Nothing, var::Integer) = true
@@ -59,7 +63,7 @@ _canchoose(diffvars::Nothing, var::Integer) = true
 
 Perform Pantelides algorithm.
 """
-function pantelides!(state::TransformationState; finalize = true, maxiters = 8000)
+function pantelides!(state::TransformationState; finalize = true, maxiters = 8000, eqfilter = eq->true, varfilter = var->true)
     @unpack graph, solvable_graph, var_to_diff, eq_to_diff = state.structure
     neqs = nsrcs(graph)
     nvars = nv(var_to_diff)
@@ -68,10 +72,10 @@ function pantelides!(state::TransformationState; finalize = true, maxiters = 800
     var_eq_matching = Matching(nvars)
     neqs′ = neqs
     nnonemptyeqs = count(
-        eq -> !isempty(𝑠neighbors(graph, eq)) && eq_to_diff[eq] === nothing,
+        eq -> !isempty(𝑠neighbors(graph, eq)) && eq_to_diff[eq] === nothing && eqfilter(eq),
         1:neqs′)
 
-    varwhitelist = computed_highest_diff_variables(state.structure)
+    varwhitelist = computed_highest_diff_variables(state.structure, varfilter)
 
     if nnonemptyeqs > count(varwhitelist)
         throw(InvalidSystemException("System is structurally singular"))
@@ -79,6 +83,7 @@ function pantelides!(state::TransformationState; finalize = true, maxiters = 800
 
     for k in 1:neqs′
         eq′ = k
+        eqfilter(k) || continue
         eq_to_diff[eq′] === nothing || continue
         isempty(𝑠neighbors(graph, eq′)) && continue
         pathfound = false

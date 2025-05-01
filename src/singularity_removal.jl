@@ -15,7 +15,7 @@ end
 level === nothing ? v : (v => level)
 end
 
-function alias_eliminate_graph!(state::TransformationState;
+function structural_singularity_removal!(state::TransformationState;
         kwargs...)
     mm = linear_subsys_adjmat!(state; kwargs...)
     if size(mm, 1) == 0
@@ -23,7 +23,7 @@ function alias_eliminate_graph!(state::TransformationState;
     end
 
     @unpack graph, var_to_diff, solvable_graph = state.structure
-    mm = alias_eliminate_graph!(state, mm)
+    mm = structural_singularity_removal!(state, mm)
     s = state.structure
     for g in (s.graph, s.solvable_graph)
         g === nothing && continue
@@ -264,7 +264,7 @@ function force_var_to_zero!(structure::SystemStructure, ils::SparseMatrixCLIL, v
     return ils
 end
 
-function alias_eliminate_graph!(state::TransformationState, ils::SparseMatrixCLIL;
+function structural_singularity_removal!(state::TransformationState, ils::SparseMatrixCLIL;
         variable_underconstrained! = force_var_to_zero!)
     @unpack structure = state
     @unpack graph, solvable_graph, var_to_diff, eq_to_diff = state.structure
