@@ -35,12 +35,14 @@ struct Matching{U, V <: AbstractVector} <: AbstractVector{Union{U, Int}} #=> :Un
     inv_match::Union{Nothing, V}
 end
 # These constructors work around https://github.com/JuliaLang/julia/issues/41948
-function Matching{V}(m::Matching) where {V}
+Matching{V}(m::Matching) where {V} = convert(Matching{V}, m)
+function Base.convert(T::Type{<:Matching{V}}, m::Matching) where {V}
     eltype(m) === Union{V, Int} && return M
     VUT = typeof(similar(m.match, Union{V, Int}))
     Matching{V}(convert(VUT, m.match),
         m.inv_match === nothing ? nothing : convert(VUT, m.inv_match))
 end
+
 Matching(m::Matching) = m
 Matching{U}(v::V) where {U, V <: AbstractVector} = Matching{U, V}(v, nothing)
 function Matching{U}(v::V, iv::Union{V, Nothing}) where {U, V <: AbstractVector}
