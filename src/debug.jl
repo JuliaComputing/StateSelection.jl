@@ -8,6 +8,8 @@ end
 Base.eltype(info::SSAUses{T}) where {T} = T
 Base.copy(uses::SSAUses) = SSAUses(copy(uses.eqs), copy(uses.vars))
 
+ssa_uses(::SystemStructure) = nothing
+
 struct SystemStructurePrintMatrix <:
        AbstractMatrix{Union{Label, BipartiteAdjacencyList}}
     bpg::BipartiteGraph
@@ -15,7 +17,7 @@ struct SystemStructurePrintMatrix <:
     var_to_diff::DiffGraph
     eq_to_diff::DiffGraph
     var_eq_matching::Union{Matching, Nothing}
-    ssa_uses::SSAUses
+    ssa_uses::Union{Nothing, SSAUses}
 end
 
 """
@@ -29,15 +31,19 @@ function SystemStructurePrintMatrix(s::SystemStructure)
         complete(s.var_to_diff),
         complete(s.eq_to_diff),
         nothing,
-        s.ssa_uses)
+        ssa_uses(s))
 end
-Base.size(bgpm::SystemStructurePrintMatrix) = (max(nsrcs(bgpm.bpg), ndsts(bgpm.bpg)) + 1, 11)
+Base.size(bgpm::SystemStructurePrintMatrix) = (max(nsrcs(bgpm.bpg), ndsts(bgpm.bpg)) + 1, 9 + 2(bgpm.ssa_uses !== nothing))
 function compute_diff_label(diff_graph, i, symbol)
     di = i - 1 <= length(diff_graph) ? diff_graph[i - 1] : nothing
     return di === nothing ? Label("") : Label(string(di, symbol))
 end
 function Base.getindex(bgpm::SystemStructurePrintMatrix, i::Integer, j::Integer)
     checkbounds(bgpm, i, j)
+    if bgpm.ssa_uses === nothing
+        # Skip SSAUse-related columns.
+        j += j ≥ 5
+    end
     if i <= 1
         return (Label.(("# eq", "∂ₜ", " ", " ", "%", "", "# v", "∂ₜ", " ", " ", "%")))[j]
     elseif j == 6
@@ -109,8 +115,11 @@ end
 struct MatchedSystemStructure
     structure::SystemStructure
     var_eq_matching::Matching
-    ssa_uses::SSAUses
+    ssa_uses::Union{Nothing, SSAUses}
 end
+MatchedSystemStructure(structure, var_eq_matching) = MatchedSystemStructure(structure, var_eq_matching, nothing)
+
+ssa_uses(ms::MatchedSystemStructure) = ms.ssa_uses
 
 """
 Create a SystemStructurePrintMatrix to display the contents
@@ -151,8 +160,8 @@ function Base.show(io::IO, mime::MIME"text/plain", ms::MatchedSystemStructure)
         printstyled(io, string(" ", symbol); color)
         printstyled(io, string(" ", label))
     end
-    T = eltype(ms.ssa_uses)
-    if T !== Any
+    if ms.ssa_uses !== nothing
+        T = eltype(ms.ssa_uses)
         (symbol, label, color) = BipartiteGraphs.overview_label(T)
         print(io, " | ")
         printstyled(io, string(" ", symbol); color)
