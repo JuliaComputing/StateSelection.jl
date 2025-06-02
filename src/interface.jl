@@ -5,7 +5,7 @@ abstract type TransformationState{T} end
 abstract type AbstractTearingState{T} <: TransformationState{T} end
 
 struct SelectedState end
-BipartiteGraphs.overview_label(::Type{SelectedState}) = ('∫', " Seleced State", :cyan)
+BipartiteGraphs.overview_label(::Type{SelectedState}) = ('∫', " Selected State", :cyan)
 
 function linear_subsys_adjmat! end
 function eq_derivative! end
