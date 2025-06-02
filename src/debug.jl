@@ -42,7 +42,7 @@ function Base.getindex(bgpm::SystemStructurePrintMatrix, i::Integer, j::Integer)
     checkbounds(bgpm, i, j)
     if bgpm.ssa_uses === nothing
         # Skip SSAUse-related columns.
-        j += j ≥ 5
+        j += j ≥ 5 + j ≥ 11
     end
     if i <= 1
         return (Label.(("# eq", "∂ₜ", " ", " ", "%", "", "# v", "∂ₜ", " ", " ", "%")))[j]
