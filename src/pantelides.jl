@@ -1,4 +1,4 @@
-using .BipartiteGraphs: 𝑑neighbors, 𝑠neighbors, nsrcs, ndsts,
+using BipartiteGraphs: 𝑑neighbors, 𝑠neighbors, nsrcs, ndsts,
     construct_augmenting_path!, unassigned, DiCMOBiGraph
 
 """

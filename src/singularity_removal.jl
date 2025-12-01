@@ -1,5 +1,5 @@
 using Graphs.Experimental.Traversals
-using .BipartiteGraphs: set_neighbors!
+using BipartiteGraphs: set_neighbors!
 
 function extreme_var(var_to_diff, v, level = nothing, ::Val{descend} = Val(true);
     callback = _ -> nothing) where {descend}

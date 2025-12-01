@@ -1,5 +1,4 @@
-
-using .BipartiteGraphs: Label, BipartiteAdjacencyList
+using BipartiteGraphs: Label, BipartiteAdjacencyList
 
 struct SSAUses{T}
     eqs::Vector{T} # equation uses

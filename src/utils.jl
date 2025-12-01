@@ -1,7 +1,7 @@
 ###
 ### Bipartite graph utilities
 ###
-using .BipartiteGraphs: 𝑠vertices, 𝑠neighbors
+using BipartiteGraphs: 𝑠vertices, 𝑠neighbors
 
 n_concrete_eqs(state::TransformationState) = n_concrete_eqs(state.structure)
 function n_concrete_eqs(graph::BipartiteGraph)

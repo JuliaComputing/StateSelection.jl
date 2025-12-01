@@ -72,7 +72,7 @@ function Base.setindex!(dg::DiffGraph, val::Union{Integer, Nothing}, var::Intege
 end
 Base.iterate(dg::DiffGraph, state...) = iterate(dg.primal_to_diff, state...)
 
-function complete(dg::DiffGraph)
+function BipartiteGraphs.complete(dg::DiffGraph)
     dg.diff_to_primal !== nothing && return dg
     diff_to_primal = Union{Int, Nothing}[nothing for _ in 1:length(dg.primal_to_diff)]
     for (var, diff) in edges(dg)
@@ -81,7 +81,7 @@ function complete(dg::DiffGraph)
     return DiffGraph(dg.primal_to_diff, diff_to_primal)
 end
 
-function invview(dg::DiffGraph)
+function BipartiteGraphs.invview(dg::DiffGraph)
     require_complete(dg)
     return DiffGraph(dg.diff_to_primal, dg.primal_to_diff)
 end

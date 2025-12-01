@@ -6,11 +6,8 @@ using UnPack: @unpack
 using Graphs
 
 # Graph Types
-function invview end
-function complete end
-include("graph/bipartite.jl")
+using BipartiteGraphs
 include("graph/diff.jl")
-using .BipartiteGraphs
 
 # Math library
 include("math/bareiss.jl")

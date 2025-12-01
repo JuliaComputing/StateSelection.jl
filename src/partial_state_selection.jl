@@ -1,4 +1,4 @@
-using .BipartiteGraphs: Unassigned, maximal_matching
+using BipartiteGraphs: Unassigned, maximal_matching
 
 function partial_state_selection_graph!(state::TransformationState)
     var_eq_matching = complete(pantelides!(state))
