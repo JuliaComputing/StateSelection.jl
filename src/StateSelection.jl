@@ -5,6 +5,7 @@ using Setfield: @set!, @set
 using UnPack: @unpack
 using Graphs
 import SparseArrays
+import OrderedCollections: OrderedSet
 
 # Graph Types
 using BipartiteGraphs

@@ -51,6 +51,112 @@ function contract_variables(graph::BipartiteGraph, var_eq_matching::Matching,
 end
 
 """
+    $(TYPEDSIGNATURES)
+
+Preemptively identify observed equations in the system and tear them. This happens before
+any simplification. The equations torn by this process are ones that are already given in
+an explicit form in the system and where the LHS is not present in any other equation of
+the system except for other such preempitvely torn equations.
+"""
+function trivial_tearing!(ts::TransformationState)
+    # equations that can be trivially torn an observed equations
+    trivial_idxs = OrderedSet{Int}()
+    # variables that have been matched to trivially torn equations
+    matched_vars = OrderedSet{Int}()
+
+    complete!(ts.structure)
+    var_to_diff = ts.structure.var_to_diff
+    graph = ts.structure.graph
+    candidates = collect(possibly_explicit_equations(ts))
+    # TODO: Use DiCMOBiGraph here and topsort the equations. It'll remove the `while true`.
+    while true
+        # track whether we added an equation to the trivial list this iteration
+        added_equation = false
+        for (i, vari) in candidates
+            # don't check already torn equations
+            i in trivial_idxs && continue
+
+            # if a variable was the LHS of two trivial observed equations, we wouldn't have
+            # included it in the list. Error if somehow it made it through.
+            @assert !(vari in matched_vars)
+            # don't tear differential/shift equations (or differentiated/shifted variables)
+            var_to_diff[vari] === nothing || continue
+            invview(var_to_diff)[vari] === nothing || continue
+            # get the equations that the candidate matched variable is present in, except
+            # those equations which have already been torn as observed
+            eqidxs = setdiff(𝑑neighbors(graph, vari), trivial_idxs)
+            # it should only be present in this equation
+            length(eqidxs) == 1 || continue
+            eqi = only(eqidxs)
+            @assert eqi == i
+
+            # for every variable present in this equation, make sure it isn't _only_
+            # present in trivial equations
+            isvalid = true
+            for v in 𝑠neighbors(graph, eqi)
+                v == vari && continue
+                v in matched_vars && continue
+                # `> 1` and not `0` because one entry will be this equation (`eqi`)
+                isvalid &= count(!in(trivial_idxs), 𝑑neighbors(graph, v)) > 1
+                isvalid || break
+            end
+            isvalid || continue
+
+            added_equation = true
+            push!(trivial_idxs, eqi)
+            push!(matched_vars, vari)
+        end
+
+        # if we didn't add an equation this iteration, we won't add one next iteration
+        added_equation || break
+    end
+
+    deleteat!(var_to_diff.primal_to_diff, matched_vars)
+    deleteat!(var_to_diff.diff_to_primal, matched_vars)
+    deleteat!(ts.structure.eq_to_diff.primal_to_diff, trivial_idxs)
+    deleteat!(ts.structure.eq_to_diff.diff_to_primal, trivial_idxs)
+    delete_srcs!(ts.structure.graph, trivial_idxs; rm_verts = true)
+    delete_dsts!(ts.structure.graph, matched_vars; rm_verts = true)
+    if ts.structure.solvable_graph !== nothing
+        delete_srcs!(ts.structure.solvable_graph, trivial_idxs; rm_verts = true)
+        delete_dsts!(ts.structure.solvable_graph, matched_vars; rm_verts = true)
+    end
+    trivial_tearing_postprocess!(ts, trivial_idxs, matched_vars)
+    return ts
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Return an iterable of tuples. The first element of each tuple is the index of an equation
+index in `state` which has a single variable (present in `get_fullvars(state)`) on the LHS.
+The second element of each tuple is the index of the variable on the LHS.
+
+These are considered candidates for [`trivial_tearing!`](@ref). Some equations may
+intentionally be filtered out from this list, such as if the variable on the LHS should be
+considered "irreducible" (not to be torn) or redundant equations which reduce to `0 ~ 0`.
+"""
+function possibly_explicit_equations(state::TransformationState)
+    error("This function must be implemented to run `trivial_tearing!`")
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Postprocessing function after running [`trivial_tearing!`](@ref). Update `state` given that
+`torn_eqs` have been preemptively torn. The order of `torn_eqs` is important, as it
+determines a topolgical ordering of the torn equations. `torn_vars` similarly identifies
+the torn variables. The ordering of `torn_vars` corresponds to that of `torn_eqs`.
+
+Prior to calling this function, the minimal required fields of `state.structure` will have
+been updated appropriately (torn elements removed). At minimum, this function should update
+`state` such that [`get_fullvars`](@ref) returns the appropriate subset of variables.
+"""
+function trivial_tearing_postprocess!(state::TransformationState, torn_eqs::OrderedSet{Int}, torn_vars::OrderedSet{Int})
+    error("This function must be implemented to run `trivial_tearing!`")
+end
+
+"""
     $TYPEDSIGNATURES
 
 Find the equations (source vertices of `graph`) which are not matched to a variable present
