@@ -22,8 +22,8 @@ include("interface.jl")
 # Structural transformation passes
 include("singularity_removal.jl")
 include("pantelides.jl")
-include("modia_tearing.jl")
 include("tearing.jl")
+include("modia_tearing.jl")
 include("partial_state_selection.jl")
 
 # Utilities
