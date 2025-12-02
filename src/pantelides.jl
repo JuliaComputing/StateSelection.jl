@@ -53,9 +53,9 @@ function computed_highest_diff_variables(structure::SystemStructure, varfilter)
 
     return varwhitelist
 end
-computed_highest_diff_variables(structure, diffvars::Union{BitVector, BitSet, Nothing}) =
+computed_highest_diff_variables(structure::SystemStructure, diffvars::Union{BitVector, BitSet, Nothing}) =
     computed_highest_diff_variables(structure, var->_canchoose(diffvars, var))
-computed_highest_diff_variables(structure, ::Nothing=nothing) =
+computed_highest_diff_variables(structure::SystemStructure, ::Nothing=nothing) =
     computed_highest_diff_variables(structure, var->true)
 _canchoose(diffvars::BitSet, var::Integer) = var in diffvars
 _canchoose(diffvars::BitVector, var::Integer) = diffvars[var]
