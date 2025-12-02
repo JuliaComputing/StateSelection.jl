@@ -1,32 +1,36 @@
 name = "StateSelection"
 uuid = "64909d44-ed92-46a8-bbd9-f047dfbdc84b"
-version = "0.2.1"
 authors = ["JuliaHub", "Inc. and other contributors"]
+version = "1.0.0"
 
 [deps]
+BipartiteGraphs = "caf10ac8-0290-4205-88aa-f15908547e8d"
 DocStringExtensions = "ffbed154-4ef7-542d-bbb7-c09d3a79fcae"
 FindFirstFunctions = "64ca27bc-2ba2-4a57-88aa-44e436879224"
 Graphs = "86223c79-3864-5bf0-83f7-82e725a168b6"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+OrderedCollections = "bac558e1-5e72-5ebc-8fee-abe8a469f55d"
 Setfield = "efcf1570-3423-57d1-acb7-fd33fddbac46"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 UnPack = "3a884ed6-31ef-47d7-9d2a-63182c4928ed"
-
-[compat]
-DocStringExtensions = "0.9.3"
-FindFirstFunctions = "1.2.0"
-Graphs = "1.10.0"
-LinearAlgebra = "1.11.0"
-Setfield = "1.1.1"
-SparseArrays = "1.11.0"
-UnPack = "1.0.2"
-julia = "1.9"
 
 [weakdeps]
 DeepDiffs = "ab62b9b5-e342-54a8-a765-a90f495de1a6"
 
 [extensions]
 StateSelectionDeepDiffsExt = "DeepDiffs"
+
+[compat]
+BipartiteGraphs = "0.1.2"
+DocStringExtensions = "0.9.3"
+FindFirstFunctions = "1.2.0"
+Graphs = "1.10.0"
+LinearAlgebra = "1.11.0"
+OrderedCollections = "1"
+Setfield = "1.1.1"
+SparseArrays = "1.11.0"
+UnPack = "1.0.2"
+julia = "1.9"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"

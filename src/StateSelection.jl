@@ -4,13 +4,12 @@ using DocStringExtensions
 using Setfield: @set!, @set
 using UnPack: @unpack
 using Graphs
+import SparseArrays
+import OrderedCollections: OrderedSet
 
 # Graph Types
-function invview end
-function complete end
-include("graph/bipartite.jl")
+using BipartiteGraphs
 include("graph/diff.jl")
-using .BipartiteGraphs
 
 # Math library
 include("math/bareiss.jl")
@@ -23,12 +22,15 @@ include("interface.jl")
 # Structural transformation passes
 include("singularity_removal.jl")
 include("pantelides.jl")
-include("modia_tearing.jl")
 include("tearing.jl")
+include("modia_tearing.jl")
 include("partial_state_selection.jl")
 
 # Utilities
 include("debug.jl")
 include("utils.jl")
+
+export DiffGraph, bareiss, CLIL, find_eq_solvables!, SelectedState
+export TearingAlgorithm, TearingResult, ModiaTearing, DummyDerivativeTearing
 
 end

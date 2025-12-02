@@ -62,6 +62,20 @@ function tear_graph_block_modia!(var_eq_matching, ict, solvable_graph, eqs, vars
     return nothing
 end
 
+@kwdef struct ModiaTearing{F, F2, F3} <: TearingAlgorithm
+    isder::F = nothing
+    varfilter::F2 = (_ -> true)
+    eqfilter::F3 = (_ -> true)
+end
+
+function (alg::ModiaTearing)(structure::SystemStructure)
+    result = StateSelection.tear_graph_modia(structure, alg.isder;
+                                             varfilter = alg.varfilter,
+                                             eqfilter = alg.eqfilter)
+    var_eq_matching, full_var_eq_matching, var_sccs = result
+    return TearingResult(var_eq_matching, full_var_eq_matching, var_sccs), (;)
+end
+
 function tear_graph_modia(structure::SystemStructure, isder::F = nothing,
         ::Type{U} = Unassigned;
         varfilter::F2 = v -> true,
@@ -91,6 +105,8 @@ function tear_graph_modia(structure::SystemStructure, isder::F = nothing,
 
     ieqs = Int[]
     filtered_vars = BitSet()
+    free_eqs = free_equations(graph, var_sccs, var_eq_matching, varfilter)
+    is_overdetemined = !isempty(free_eqs)
     for vars in var_sccs
         for var in vars
             if varfilter(var)
@@ -105,10 +121,14 @@ function tear_graph_modia(structure::SystemStructure, isder::F = nothing,
             filtered_vars,
             isder)
 
-        # clear cache
-        vargraph.ne = 0
-        for var in vars
-            vargraph.matching[var] = unassigned
+        # If the systems is overdetemined, we cannot assume the free equations
+        # will not form algebraic loops with equations in the sccs.
+        if !is_overdetemined
+            # clear cache
+            vargraph.ne = 0
+            for var in vars
+                vargraph.matching[var] = unassigned
+            end
         end
         empty!(ieqs)
         empty!(filtered_vars)

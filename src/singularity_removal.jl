@@ -1,5 +1,5 @@
 using Graphs.Experimental.Traversals
-using .BipartiteGraphs: set_neighbors!
+using BipartiteGraphs: set_neighbors!
 
 function extreme_var(var_to_diff, v, level = nothing, ::Val{descend} = Val(true);
     callback = _ -> nothing) where {descend}
@@ -25,10 +25,12 @@ function structural_singularity_removal!(state::TransformationState;
     @unpack graph, var_to_diff, solvable_graph = state.structure
     mm = structural_singularity_removal!(state, mm)
     s = state.structure
-    for g in (s.graph, s.solvable_graph)
-        g === nothing && continue
+    for (ei, e) in enumerate(mm.nzrows)
+        set_neighbors!(s.graph, e, mm.row_cols[ei])
+    end
+    if s.solvable_graph isa BipartiteGraph{Int, Nothing}
         for (ei, e) in enumerate(mm.nzrows)
-            set_neighbors!(g, e, mm.row_cols[ei])
+            set_neighbors!(s.solvable_graph, e, mm.row_cols[ei])
         end
     end
 
@@ -202,7 +204,13 @@ function aag_bareiss!(structure, mm_orig::SparseMatrixCLIL{T, Ti}) where {T, Ti}
         bar = do_bareiss!(mm, mm_orig, is_linear_variables, is_highest_diff)
     end
 
-    return mm, solvable_variables, bar
+    # This phrasing infers the return type as `Union{Tuple{...}}` instead of
+    # `Tuple{Union{...}, ...}`
+    if mm isa SparseMatrixCLIL{BigInt, Ti}
+        return mm, solvable_variables, bar
+    else
+        return mm, solvable_variables, bar
+    end
 end
 
 function do_bareiss!(M, Mold, is_linear_variables, is_highest_diff)
