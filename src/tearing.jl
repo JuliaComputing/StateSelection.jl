@@ -1,26 +1,3 @@
-struct EquationSolveError
-    eq::Any
-    var::Any
-    rhs::Any
-end
-
-function Base.showerror(io::IO, ese::EquationSolveError)
-    print(io, "EquationSolveError: While solving\n\n\t")
-    print(io, ese.eq)
-    print(io, "\nfor ")
-    printstyled(io, var, bold = true)
-    print(io, ", obtained RHS\n\n\tt")
-    println(io, rhs)
-end
-
-function masked_cumsum!(A::Vector)
-    acc = zero(eltype(A))
-    for i in eachindex(A)
-        iszero(A[i]) && continue
-        A[i] = (acc += A[i])
-    end
-end
-
 function contract_variables(graph::BipartiteGraph, var_eq_matching::Matching,
         var_rename, eq_rename, nelim_eq, nelim_var)
     dig = DiCMOBiGraph{true}(graph, var_eq_matching)
