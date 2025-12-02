@@ -4,6 +4,7 @@ using DocStringExtensions
 using Setfield: @set!, @set
 using UnPack: @unpack
 using Graphs
+import SparseArrays
 
 # Graph Types
 using BipartiteGraphs
