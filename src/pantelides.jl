@@ -2,7 +2,7 @@ using BipartiteGraphs: 𝑑neighbors, 𝑠neighbors, nsrcs, ndsts,
     construct_augmenting_path!, unassigned, DiCMOBiGraph
 
 """
-    computed_highest_diff_variables(structure)
+    $TYPEDSIGNATURES
 
 Computes which variables are the "highest-differentiated" for purposes of
 pantelides. Ordinarily this is relatively straightforward. However, in our
@@ -14,8 +14,11 @@ case, there is one complicating condition:
 
 This function takes care of these complications are returns a boolean array
 for every variable, indicating whether it is considered "highest-differentiated".
+
+`varfilter` is a filter function which takes index of a variable in `structure` and
+determines whether it should be included in the list.
 """
-function computed_highest_diff_variables(structure, varfilter)
+function computed_highest_diff_variables(structure::SystemStructure, varfilter)
     @unpack graph, var_to_diff = structure
 
     nvars = length(var_to_diff)
