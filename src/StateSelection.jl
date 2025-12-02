@@ -30,4 +30,7 @@ include("partial_state_selection.jl")
 include("debug.jl")
 include("utils.jl")
 
+export DiffGraph, bareiss, CLIL, find_eq_solvables!, SelectedState
+export TearingAlgorithm, TearingResult, ModiaTearing, DummyDerivativeTearing
+
 end
