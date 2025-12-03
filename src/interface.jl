@@ -44,6 +44,21 @@ Get the ordered list of variables in the given `TransformationState`. Defaults t
 `ts.fullvars`.
 """
 @inline get_fullvars(ts::TransformationState) = ts.fullvars
+"""
+    $TYPEDSIGNATURES
+
+Whether [`StateSelection.equations`](@ref) can be called on `ts`. Defaults to `false`.
+"""
+has_equations(ts::TransformationState) = false
+"""
+    equations(state::StateSelection.TransformationState)
+
+Return a list of equations in the `state`, in the same order as the source vertices of
+the incidence graph. This is an optional method only used for better error messages. If
+this method is implemented, [`StateSelection.has_equations`](@ref) should also be made to
+return `true` for this type.
+"""
+function equations end
 
 """
     $TYPEDSIGNATURES
