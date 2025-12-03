@@ -35,7 +35,7 @@ get_time_domain(x::Num) = get_time_domain(SU.unwrap(x))
 Determine if variable `x` has a time-domain attributed to it.
 """
 function has_time_domain(x::SymbolicT)
-    SU.getmetadata(x, VariableTimeDomain, nothing) !== nothing
+    SU.getmetadata(x, MTKBase.VariableTimeDomain, nothing) !== nothing
 end
 has_time_domain(x::Num) = has_time_domain(SU.unwrap(x))
 has_time_domain(x) = false
