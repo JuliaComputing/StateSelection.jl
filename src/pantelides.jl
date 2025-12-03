@@ -66,7 +66,7 @@ _canchoose(diffvars::Nothing, var::Integer) = true
 
 Perform Pantelides algorithm.
 """
-function pantelides!(state::TransformationState; finalize = true, maxiters = 8000, eqfilter = eq->true, varfilter = var->true)
+function pantelides!(state::TransformationState; finalize = true, maxiters = 8000, eqfilter = eq->true, varfilter = var->true, _...)
     @unpack graph, solvable_graph, var_to_diff, eq_to_diff = state.structure
     neqs = nsrcs(graph)
     nvars = nv(var_to_diff)

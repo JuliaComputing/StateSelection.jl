@@ -16,14 +16,14 @@ level === nothing ? v : (v => level)
 end
 
 function structural_singularity_removal!(state::TransformationState;
-        kwargs...)
+        variable_underconstrained! = force_var_to_zero!, kwargs...)
     mm = linear_subsys_adjmat!(state; kwargs...)
     if size(mm, 1) == 0
         return mm # No linear subsystems
     end
 
     @unpack graph, var_to_diff, solvable_graph = state.structure
-    mm = structural_singularity_removal!(state, mm)
+    mm = structural_singularity_removal!(state, mm; variable_underconstrained!)
     s = state.structure
     for (ei, e) in enumerate(mm.nzrows)
         set_neighbors!(s.graph, e, mm.row_cols[ei])

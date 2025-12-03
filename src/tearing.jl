@@ -88,15 +88,21 @@ function trivial_tearing!(ts::TransformationState)
         added_equation || break
     end
 
-    deleteat!(var_to_diff.primal_to_diff, matched_vars)
-    deleteat!(var_to_diff.diff_to_primal, matched_vars)
-    deleteat!(ts.structure.eq_to_diff.primal_to_diff, trivial_idxs)
-    deleteat!(ts.structure.eq_to_diff.diff_to_primal, trivial_idxs)
-    delete_srcs!(ts.structure.graph, trivial_idxs; rm_verts = true)
-    delete_dsts!(ts.structure.graph, matched_vars; rm_verts = true)
+    # `deleteat!` requires sorted indices, but we want to maintain relative order to pass
+    # to `trivial_tearing_postprocess!`
+    torn_vars_idxs = collect(matched_vars)
+    sort!(torn_vars_idxs)
+    torn_eqs_idxs = collect(trivial_idxs)
+    sort!(torn_eqs_idxs)
+    deleteat!(var_to_diff.primal_to_diff, torn_vars_idxs)
+    deleteat!(var_to_diff.diff_to_primal, torn_vars_idxs)
+    deleteat!(ts.structure.eq_to_diff.primal_to_diff, torn_eqs_idxs)
+    deleteat!(ts.structure.eq_to_diff.diff_to_primal, torn_eqs_idxs)
+    delete_srcs!(ts.structure.graph, torn_eqs_idxs; rm_verts = true)
+    delete_dsts!(ts.structure.graph, torn_vars_idxs; rm_verts = true)
     if ts.structure.solvable_graph !== nothing
-        delete_srcs!(ts.structure.solvable_graph, trivial_idxs; rm_verts = true)
-        delete_dsts!(ts.structure.solvable_graph, matched_vars; rm_verts = true)
+        delete_srcs!(ts.structure.solvable_graph, torn_eqs_idxs; rm_verts = true)
+        delete_dsts!(ts.structure.solvable_graph, torn_vars_idxs; rm_verts = true)
     end
     trivial_tearing_postprocess!(ts, trivial_idxs, matched_vars)
     return ts

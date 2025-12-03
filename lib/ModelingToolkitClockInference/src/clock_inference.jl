@@ -246,6 +246,7 @@ function is_time_domain_conversion(v::SymbolicT)
             isempty(itd) && return true
             otd = output_timedomain(f)::InputTimeDomainElT
             (itd[1] == otd)::Bool || return true
+            return false
         end
         _ => return false
     end

@@ -164,18 +164,14 @@ end
 Find strongly connected components of the variables defined by `g`. `assign`
 gives the undirected bipartite graph a direction. When `assign === nothing`, we
 assume that the ``i``-th variable is assigned to the ``i``-th equation.
-
-If `topsort == true`, topologically sort the SCCs.
 """
-function find_var_sccs(g::BipartiteGraph, assign = nothing; topsort = false)
+function find_var_sccs(g::BipartiteGraph, assign = nothing)
     cmog = DiCMOBiGraph{true}(g,
         Matching(assign === nothing ? Base.OneTo(nsrcs(g)) : assign))
     sccs = Graphs.strongly_connected_components(cmog)
-    if topsort
-        cgraph = MatchedCondensationGraph(cmog, sccs)
-        toporder = topological_sort(cgraph)
-        sccs = sccs[toporder]
-    end
+    cgraph = MatchedCondensationGraph(cmog, sccs)
+    toporder = topological_sort(cgraph)
+    sccs = sccs[toporder]
     foreach(sort!, sccs)
     return sccs
 end
