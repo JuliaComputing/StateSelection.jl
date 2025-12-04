@@ -119,3 +119,30 @@ is_timevarying_operator(::Type{<:SU.Operator}) = true
 is_timevarying_operator(::Type{MTKBase.Initial}) = false
 is_timevarying_operator(::Type{MTKBase.Pre}) = false
 is_timevarying_operator(::Type) = false
+
+"""
+    $(TYPEDSIGNATURES)
+
+Trait to be implemented for operators which determines whether application of the operator
+generates a semantically different variable or not. For example, `Differential` and `Shift`
+are not transparent but `Sample` and `Hold` are. Defaults to `false` if not implemented.
+"""
+is_transparent_operator(x) = is_transparent_operator(typeof(x))
+is_transparent_operator(::Type) = false
+is_transparent_operator(::Type{MTKBase.Sample}) = true
+is_transparent_operator(::Type{MTKBase.Hold}) = true
+
+"""
+    $TYPEDSIGNATURES
+
+The rate at which a clock samples.
+"""
+sampletime(c) = Moshi.Match.@match c begin
+    x::SciMLBase.AbstractClock => nothing
+    SciMLBase.PeriodicClock(dt) => dt
+    _ => nothing
+end
+
+sampletime(op::MTKBase.Sample, _ = nothing) = sampletime(op.clock)
+sampletime(op::MTKBase.ShiftIndex, _ = nothing) = sampletime(op.clock)
+
