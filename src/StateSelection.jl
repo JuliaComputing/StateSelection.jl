@@ -2,7 +2,6 @@ module StateSelection
 
 using DocStringExtensions
 using Setfield: @set!, @set
-using UnPack: @unpack
 using Graphs
 import SparseArrays
 import OrderedCollections: OrderedSet

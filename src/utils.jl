@@ -112,7 +112,7 @@ instead of throwing an error. The singular case will print a warning.
 """
 function check_consistency(state::TransformationState, orig_inputs; nothrow = false)
     neqs = n_concrete_eqs(state)
-    @unpack graph, var_to_diff = state.structure
+    (; graph, var_to_diff) = state.structure
     highest_vars = computed_highest_diff_variables(complete!(state.structure))
     n_highest_vars = 0
     for (v, h) in enumerate(highest_vars)

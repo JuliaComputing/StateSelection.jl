@@ -98,7 +98,7 @@ end
 Base.show(io::IO, inc::IncidenceMarker) = print(io, inc.active ? "x" : " ")
 
 function Base.show(io::IO, mime::MIME"text/plain", s::SystemStructure)
-    @unpack graph, solvable_graph, var_to_diff, eq_to_diff = s
+    (; graph, solvable_graph, var_to_diff, eq_to_diff) = s
     if !get(io, :limit, true) || !get(io, :mtk_limit, true)
         print(io, "SystemStructure with ", length(s.graph.fadjlist), " equations and ",
             isa(s.graph.badjlist, Int) ? s.graph.badjlist : length(s.graph.badjlist),
@@ -139,7 +139,7 @@ end
 
 function Base.show(io::IO, mime::MIME"text/plain", ms::MatchedSystemStructure)
     s = ms.structure
-    @unpack graph, solvable_graph, var_to_diff, eq_to_diff = s
+    (; graph, solvable_graph, var_to_diff, eq_to_diff) = s
     print(io, "Matched SystemStructure with ", length(graph.fadjlist), " equations and ",
         isa(graph.badjlist, Int) ? graph.badjlist : length(graph.badjlist),
         " variables\n")

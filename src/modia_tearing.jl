@@ -91,7 +91,7 @@ function tear_graph_modia(structure::SystemStructure, isder::F = nothing,
     # to have optimal solutions that cannot be found by this process. We will not
     # find them here [TODO: It would be good to have an explicit example of this.]
 
-    @unpack graph, solvable_graph = structure
+    (; graph, solvable_graph) = structure
     var_eq_matching = maximal_matching(graph, U,
         srcfilter=eqfilter,
         dstfilter=varfilter)
@@ -101,7 +101,9 @@ function tear_graph_modia(structure::SystemStructure, isder::F = nothing,
     full_var_eq_matching = copy(var_eq_matching)
     var_sccs = find_var_sccs(graph, var_eq_matching)
     vargraph = DiCMOBiGraph{true}(graph)
-    ict = IncrementalCycleTracker(vargraph; dir = :in)
+    # Inlining `IncrementalCycleTracker(vargraph; dir = :in)` because calling it
+    # directly doesn't infer.
+    ict = Graphs.DenseGraphICT_BFGT_N{:in}(vargraph)
 
     ieqs = Int[]
     filtered_vars = BitSet()

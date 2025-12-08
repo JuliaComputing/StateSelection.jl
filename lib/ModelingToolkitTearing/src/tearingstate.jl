@@ -89,8 +89,7 @@ function TearingState(sys::System; check::Bool = true, sort_eqs::Bool = true)
     sys = MTKBase.discrete_unknowns_to_parameters(sys)
     sys = MTKBase.discover_globalscoped(sys)
     MTKBase.check_no_parameter_equations(sys)
-    ivs = independent_variables(sys)
-    iv = length(ivs) == 1 ? ivs[1] : nothing
+    iv = MTKBase.get_iv(sys)
     # flatten array equations
     eqs = MTKBase.flatten_equations(equations(sys))
     original_eqs = copy(eqs)
@@ -134,7 +133,7 @@ function TearingState(sys::System; check::Bool = true, sort_eqs::Bool = true)
 
             # TODO: Can we handle this without `isparameter`?
             if v in ps
-                if is_time_dependent_parameter(v, ps, iv) &&
+                if iv isa SymbolicT && is_time_dependent_parameter(v, ps, iv) &&
                    !haskey(param_derivative_map, Differential(iv)(v)) && !(Differential(iv)(v) in no_deriv_params)
                     # Parameter derivatives default to zero - they stay constant
                     # between callbacks
@@ -143,13 +142,10 @@ function TearingState(sys::System; check::Bool = true, sort_eqs::Bool = true)
                 continue
             end
 
-            isequal(v, iv) && continue
-            MTKBase.isdelay(v, iv) && continue
+            iv isa SymbolicT && isequal(v, iv) && continue
+            iv isa SymbolicT && MTKBase.isdelay(v, iv) && continue
 
             if !in(v, dvs)
-                isvalid = iscall(v) &&
-                          (operation(v) isa Shift || isempty(arguments(v)) ||
-                           is_transparent_operator(operation(v)))
                 isvalid = @match v begin
                     BSImpl.Term(; f, args) => f isa Shift || isempty(args) || f isa SU.Operator && is_transparent_operator(f)::Bool
                     _ => false
@@ -180,9 +176,11 @@ function TearingState(sys::System; check::Bool = true, sort_eqs::Bool = true)
                 addvar!(v, VARIABLE)
                 @match v begin
                     BSImpl.Term(; f, args) && if f isa SU.Operator &&
-                            !(f isa Differential) && (it = input_timedomain(v)::Vector{InputTimeDomainElT}) !== nothing
+                            !(f isa Differential)
                         end => begin
-                            for (v′, td) in zip(args, it)
+                            it = input_timedomain(v)::Vector{InputTimeDomainElT}
+                            for (i, td) in enumerate(it)
+                                v′ = args[i]
                                 addvar!(setmetadata(v′, MTKBase.VariableTimeDomain, td), VARIABLE)
                             end
                     end
@@ -209,8 +207,8 @@ function TearingState(sys::System; check::Bool = true, sort_eqs::Bool = true)
                     addvar!(vi, VARIABLE)
                 end
             else
-                vv = collect(v)
-                union!(incidence, vv)::Array{SymbolicT}
+                vv = collect(v)::Array{SymbolicT}
+                union!(incidence, vv)
                 for vi in vv
                     addvar!(vi, VARIABLE)
                 end
