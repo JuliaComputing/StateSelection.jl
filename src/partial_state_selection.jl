@@ -35,7 +35,7 @@ struct DiffData
 end
 
 function pss_graph_modia!(structure::SystemStructure, maximal_top_matching, diff_data::Union{Nothing, DiffData}=nothing)
-    @unpack eq_to_diff, var_to_diff, graph, solvable_graph = structure
+    (; eq_to_diff, var_to_diff, graph, solvable_graph) = structure
 
     # var_eq_matching is a maximal matching on the top-differentiated variables.
     # Find Strongly connected components. Note that after pantelides, we expect
@@ -134,7 +134,7 @@ function pss_graph_modia!(structure::SystemStructure, maximal_top_matching, diff
 end
 
 function partial_state_selection_graph!(structure::SystemStructure, var_eq_matching)
-    @unpack eq_to_diff, var_to_diff, graph, solvable_graph = structure
+    (; eq_to_diff, var_to_diff, graph, solvable_graph) = structure
     eq_to_diff = complete(eq_to_diff)
 
     inv_eqlevel = map(1:nsrcs(graph)) do eq
@@ -204,7 +204,7 @@ function dummy_derivative_graph!(
         structure::SystemStructure, var_eq_matching, jac = nothing,
         state_priority = nothing, ::Val{log} = Val(false);
         tearing_alg::TearingAlgorithm = DummyDerivativeTearing(), kwargs...) where {log}
-    @unpack eq_to_diff, var_to_diff, graph = structure
+    (; eq_to_diff, var_to_diff, graph) = structure
     diff_to_eq = invview(eq_to_diff)
     diff_to_var = invview(var_to_diff)
     invgraph = invview(graph)
@@ -368,7 +368,7 @@ function dummy_derivative_graph!(
 end
 
 function is_present(structure, v)::Bool
-    @unpack var_to_diff, graph = structure
+    (; var_to_diff, graph) = structure
     while true
         # if a higher derivative is present, then it's present
         isempty(𝑑neighbors(graph, v)) || return true
@@ -386,13 +386,13 @@ end
 # We don't want tearing to give us `y_t ~ D(y)`, so we skip equations with
 # actually differentiated variables.
 function isdiffed((structure, dummy_derivatives), v)::Bool
-    @unpack var_to_diff, graph = structure
+    (; var_to_diff, graph) = structure
     diff_to_var = invview(var_to_diff)
     diff_to_var[v] !== nothing && is_some_diff(structure, dummy_derivatives, v)
 end
 
 function tearing_with_dummy_derivatives(structure, dummy_derivatives)
-    @unpack var_to_diff = structure
+    (; var_to_diff) = structure
     # We can eliminate variables that are not selected (differential
     # variables). Selected unknowns are differentiated variables that are not
     # dummy derivatives.
@@ -419,7 +419,7 @@ end
 struct DummyDerivativeTearing <: TearingAlgorithm end
 
 function (::DummyDerivativeTearing)(structure::SystemStructure, dummy_derivatives::Union{BitSet, Tuple{}} = ())
-    @unpack var_to_diff = structure
+    (; var_to_diff) = structure
     # We can eliminate variables that are not selected (differential
     # variables). Selected unknowns are differentiated variables that are not
     # dummy derivatives.

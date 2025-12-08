@@ -22,7 +22,7 @@ function structural_singularity_removal!(state::TransformationState;
         return mm # No linear subsystems
     end
 
-    @unpack graph, var_to_diff, solvable_graph = state.structure
+    (; graph, var_to_diff, solvable_graph) = state.structure
     mm = structural_singularity_removal!(state, mm; variable_underconstrained!)
     s = state.structure
     for (ei, e) in enumerate(mm.nzrows)
@@ -169,7 +169,7 @@ function find_linear_variables(graph, linear_equations, var_to_diff, irreducible
 end
 
 function aag_bareiss!(structure, mm_orig::SparseMatrixCLIL{T, Ti}) where {T, Ti}
-    @unpack graph, var_to_diff = structure
+    (; graph, var_to_diff) = structure
     mm = copy(mm_orig)
     linear_equations_set = BitSet(mm_orig.nzrows)
 
@@ -259,7 +259,7 @@ function do_bareiss!(M, Mold, is_linear_variables, is_highest_diff)
 end
 
 function force_var_to_zero!(structure::SystemStructure, ils::SparseMatrixCLIL, v::Int)
-    @unpack graph, solvable_graph, eq_to_diff = structure
+    (; graph, solvable_graph, eq_to_diff) = structure
     @set! ils.nparentrows += 1
     push!(ils.nzrows, ils.nparentrows)
     push!(ils.row_cols, [v])
@@ -274,8 +274,8 @@ end
 
 function structural_singularity_removal!(state::TransformationState, ils::SparseMatrixCLIL;
         variable_underconstrained! = force_var_to_zero!)
-    @unpack structure = state
-    @unpack graph, solvable_graph, var_to_diff, eq_to_diff = state.structure
+    (; structure) = state
+    (; graph, solvable_graph, var_to_diff, eq_to_diff) = state.structure
     # Step 1: Perform Bareiss factorization on the adjacency matrix of the linear
     #         subsystem of the system we're interested in.
     #

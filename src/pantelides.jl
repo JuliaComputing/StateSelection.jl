@@ -19,7 +19,7 @@ for every variable, indicating whether it is considered "highest-differentiated"
 determines whether it should be included in the list.
 """
 function computed_highest_diff_variables(structure::SystemStructure, varfilter)
-    @unpack graph, var_to_diff = structure
+    (; graph, var_to_diff) = structure
 
     nvars = length(var_to_diff)
     varwhitelist = falses(nvars)
@@ -67,7 +67,7 @@ _canchoose(diffvars::Nothing, var::Integer) = true
 Perform Pantelides algorithm.
 """
 function pantelides!(state::TransformationState; finalize = true, maxiters = 8000, eqfilter = eq->true, varfilter = var->true, _...)
-    @unpack graph, solvable_graph, var_to_diff, eq_to_diff = state.structure
+    (; graph, solvable_graph, var_to_diff, eq_to_diff) = state.structure
     neqs = nsrcs(graph)
     nvars = nv(var_to_diff)
     vcolor = falses(nvars)
