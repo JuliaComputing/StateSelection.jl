@@ -134,8 +134,9 @@ function StateSelection.find_eq_solvables!(state::TearingState, ieq, to_rm = Int
         # When the expression is linear with numeric `a`, then we can safely
         # only consider `b` for the following iterations.
         term = b
-        if SU._isone(abs(unwrap_const(a)))
-            coeffs === nothing || push!(coeffs, convert(Int, unwrap_const(a)))
+        a_is_one = SU._isone(a)
+        if a_is_one || manual_dispatch_isabsone(unwrap_const(a))
+            coeffs === nothing || push!(coeffs, a_is_one ? 1 : -1)
         else
             all_int_vars = false
             conservative && continue
@@ -156,3 +157,22 @@ function StateSelection.find_eq_solvables!(state::TearingState, ieq, to_rm = Int
     all_int_vars, term
 end
 
+function manual_dispatch_isabsone(@nospecialize(x))
+    if x isa Int
+        return isone(abs(x))
+    elseif x isa BigInt
+        return isone(abs(x))
+    elseif x isa Float64
+        return isone(abs(x))
+    elseif x isa Float32
+        return isone(abs(x))
+    elseif x isa BigFloat
+        return isone(abs(x))
+    elseif x isa Rational{Int}
+        return isone(abs(x))
+    elseif x isa Rational{BigInt}
+        return isone(abs(x))
+    else
+        return isone(abs(x))::Bool
+    end
+end

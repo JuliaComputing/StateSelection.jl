@@ -1076,7 +1076,7 @@ function (alg::DefaultReassembleAlgorithm)(state::TearingState,
     dummy_sub = Dict{SymbolicT, SymbolicT}()
 
     if MTKBase.has_iv(state.sys) && MTKBase.get_iv(state.sys) !== nothing
-        iv = MTKBase.get_iv(state.sys)
+        iv = MTKBase.get_iv(state.sys)::SymbolicT
         if !StateSelection.is_only_discrete(state.structure)
             D = Differential(iv)
         else
@@ -1089,29 +1089,50 @@ function (alg::DefaultReassembleAlgorithm)(state::TearingState,
     extra_unknowns = state.fullvars[extra_eqs_vars[2]]
     if StateSelection.is_only_discrete(state.structure)
         var_sccs = add_additional_history!(
-            state, var_eq_matching, full_var_eq_matching, var_sccs, iv)
+            state, var_eq_matching, full_var_eq_matching, var_sccs, iv::SymbolicT)
     end
 
     # Structural simplification
-    substitute_derivatives_algevars!(state, neweqs, var_eq_matching, dummy_sub, iv, D)
+    if iv isa SymbolicT # Without iv we don't have derivatives
+        D = D::Union{Differential, Shift}
+        substitute_derivatives_algevars!(state, neweqs, var_eq_matching, dummy_sub, iv, D)
 
-    var_sccs = generate_derivative_variables!(
-        state, neweqs, var_eq_matching, full_var_eq_matching, var_sccs, mm, iv)
-    neweqs, solved_eqs,
-    eq_ordering,
-    var_ordering,
-    nelim_eq,
-    nelim_var = generate_system_equations!(
-        state, neweqs, var_eq_matching, full_var_eq_matching,
-        var_sccs, extra_eqs_vars, iv, D; simplify, inline_linear_sccs,
-        analytical_linear_scc_limit)
+        var_sccs = generate_derivative_variables!(
+            state, neweqs, var_eq_matching, full_var_eq_matching, var_sccs, mm, iv)
+    end
+    if iv isa SymbolicT
+        D = D::Union{Differential, Shift}
+        neweqs, solved_eqs,
+        eq_ordering,
+        var_ordering,
+        nelim_eq,
+        nelim_var = generate_system_equations!(
+            state, neweqs, var_eq_matching, full_var_eq_matching,
+            var_sccs, extra_eqs_vars, iv, D; simplify, inline_linear_sccs,
+            analytical_linear_scc_limit)
+        state = reorder_vars!(
+            state, var_eq_matching, var_sccs, eq_ordering, var_ordering, nelim_eq, nelim_var)
+        # var_eq_matching and full_var_eq_matching are now invalidated
 
-    state = reorder_vars!(
-        state, var_eq_matching, var_sccs, eq_ordering, var_ordering, nelim_eq, nelim_var)
-    # var_eq_matching and full_var_eq_matching are now invalidated
+        sys = update_simplified_system!(state, neweqs, solved_eqs, dummy_sub, var_sccs,
+            extra_unknowns, iv, D; array_hack)
+    else
+        D = D::Nothing
+        neweqs, solved_eqs,
+            eq_ordering,
+            var_ordering,
+            nelim_eq,
+            nelim_var = generate_system_equations!(
+                state, neweqs, var_eq_matching, full_var_eq_matching,
+                var_sccs, extra_eqs_vars, iv, D; simplify, inline_linear_sccs,
+                analytical_linear_scc_limit)
+        state = reorder_vars!(
+            state, var_eq_matching, var_sccs, eq_ordering, var_ordering, nelim_eq, nelim_var)
+        # var_eq_matching and full_var_eq_matching are now invalidated
 
-    sys = update_simplified_system!(state, neweqs, solved_eqs, dummy_sub, var_sccs,
-        extra_unknowns, iv, D; array_hack)
+        sys = update_simplified_system!(state, neweqs, solved_eqs, dummy_sub, var_sccs,
+            extra_unknowns, iv, D; array_hack)
+    end
 
     @set! state.sys = sys
     @set! sys.tearing_state = state

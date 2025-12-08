@@ -58,17 +58,136 @@ end
 
 struct NotInferredTimeDomain end
 
+struct InferEquationClosure
+    varsbuf::Set{SymbolicT}
+    # variables in each argument to an operator
+    arg_varsbuf::Set{SymbolicT}
+    # hyperedge for each equation
+    hyperedge::Set{ClockVertex.Type}
+    # hyperedge for each argument to an operator
+    arg_hyperedge::Set{ClockVertex.Type}
+    # mapping from `i` in `InferredDiscrete(i)` to the vertices in that inferred partition
+    relative_hyperedges::Dict{Int, Set{ClockVertex.Type}}
+    var_to_idx::Dict{SymbolicT, Int}
+    inference_graph::HyperGraph{ClockVertex.Type}
+end
+
+function InferEquationClosure(var_to_idx, inference_graph)
+    InferEquationClosure(Set{SymbolicT}(), Set{SymbolicT}(), Set{ClockVertex.Type}(),
+                         Set{ClockVertex.Type}(), Dict{Int, Set{ClockVertex.Type}}(),
+                         var_to_idx, inference_graph)
+end
+
+function (iec::InferEquationClosure)(ieq::Int, eq::Equation, is_initialization_equation::Bool)
+    (; varsbuf, arg_varsbuf, hyperedge, arg_hyperedge, relative_hyperedges) = iec
+    (; var_to_idx, inference_graph) = iec
+    empty!(varsbuf)
+    empty!(hyperedge)
+    # get variables in equation
+    SU.search_variables!(varsbuf, eq; is_atomic = MTKBase.OperatorIsAtomic{SU.Operator}())
+    # add the equation to the hyperedge
+    eq_node = if is_initialization_equation
+        ClockVertex.InitEquation(ieq)
+    else
+        ClockVertex.Equation(ieq)
+    end
+    push!(hyperedge, eq_node)
+    for var in varsbuf
+        idx = get(var_to_idx, var, nothing)
+        # if this is just a single variable, add it to the hyperedge
+        if idx isa Int
+            push!(hyperedge, ClockVertex.Variable(idx))
+            # we don't immediately `continue` here because this variable might be a
+            # `Sample` or similar and we want the clock information from it if it is.
+        end
+        # now we only care about synchronous operators
+        op, args = @match var begin
+            BSImpl.Term(; f, args) && if is_timevarying_operator(f)::Bool end => (f, args)
+            _ => continue
+        end
+
+        # arguments and corresponding time domains
+        tdomains = input_timedomain(op)::Vector{InputTimeDomainElT}
+        nargs = length(args)
+        ndoms = length(tdomains)
+        if nargs != ndoms
+            throw(ArgumentError("""
+            Operator $op applied to $nargs arguments $args but only returns $ndoms \
+            domains $tdomains from `input_timedomain`.
+            """))
+        end
+
+        # each relative clock mapping is only valid per operator application
+        empty!(relative_hyperedges)
+        for (arg, domain) in zip(args, tdomains)
+            empty!(arg_varsbuf)
+            empty!(arg_hyperedge)
+            # get variables in argument
+            SU.search_variables!(arg_varsbuf, arg; is_atomic = MTKBase.OperatorIsAtomic{Union{Differential, MTKBase.Shift}}())
+            # get hyperedge for involved variables
+            for v in arg_varsbuf
+                vidx = get(var_to_idx, v, nothing)
+                vidx === nothing && continue
+                push!(arg_hyperedge, ClockVertex.Variable(vidx))
+            end
+
+            @match domain begin
+                # If the time domain for this argument is a clock, then all variables in this edge have that clock.
+                x::SciMLBase.AbstractClock => begin
+                    # add the clock to the edge
+                    push!(arg_hyperedge, ClockVertex.Clock(x))
+                    # add the edge to the graph
+                    add_edge!(inference_graph, arg_hyperedge)
+                end
+                # We only know that this time domain is inferred. Treat it as a unique domain, all we know is that the
+                # involved variables have the same clock.
+                InferredClock.Inferred() => add_edge!(inference_graph, arg_hyperedge)
+                # All `InferredDiscrete` with the same `i` have the same clock (including output domain) so we don't
+                # add the edge, and instead add this to the `relative_hyperedges` mapping.
+                InferredClock.InferredDiscrete(i) => begin
+                    relative_edge = get!(Set{ClockVertex.Type}, relative_hyperedges, i)
+                    union!(relative_edge, arg_hyperedge)
+                end
+            end
+        end
+
+        outdomain = output_timedomain(op)
+        @match outdomain begin
+            x::SciMLBase.AbstractClock => begin
+                push!(hyperedge, ClockVertex.Clock(x))
+            end
+            InferredClock.Inferred() => nothing
+            InferredClock.InferredDiscrete(i) => begin
+                buffer = get(relative_hyperedges, i, nothing)
+                if buffer !== nothing
+                    union!(hyperedge, buffer)
+                    delete!(relative_hyperedges, i)
+                end
+            end
+        end
+
+        for (_, relative_edge) in relative_hyperedges
+            add_edge!(inference_graph, relative_edge)
+        end
+    end
+
+    add_edge!(inference_graph, hyperedge)
+end
+
 """
 Update the equation-to-time domain mapping by inferring the time domain from the variables.
 """
 function infer_clocks!(ci::ClockInference)
     (; ts, eq_domain, init_eq_domain, var_domain, inferred, inference_graph) = ci
-    (; var_to_diff, graph) = ts.structure
     sys = get_sys(ts)
     fullvars = StateSelection.get_fullvars(ts)
     isempty(inferred) && return ci
 
-    var_to_idx = Dict{SymbolicT, Int}(fullvars .=> eachindex(fullvars))
+    var_to_idx = Dict{SymbolicT, Int}()
+    sizehint!(var_to_idx, length(fullvars))
+    for (i, v) in enumerate(fullvars)
+        var_to_idx[v] = i
+    end
 
     # all shifted variables have the same clock as the unshifted variant
     for (i, v) in enumerate(fullvars)
@@ -81,112 +200,8 @@ function infer_clocks!(ci::ClockInference)
             _ => nothing
         end
     end
+    infer_equation = InferEquationClosure(var_to_idx, inference_graph)
 
-    # preallocated buffers:
-    # variables in each equation
-    varsbuf = Set{SymbolicT}()
-    # variables in each argument to an operator
-    arg_varsbuf = Set{SymbolicT}()
-    # hyperedge for each equation
-    hyperedge = Set{ClockVertex.Type}()
-    # hyperedge for each argument to an operator
-    arg_hyperedge = Set{ClockVertex.Type}()
-    # mapping from `i` in `InferredDiscrete(i)` to the vertices in that inferred partition
-    relative_hyperedges = Dict{Int, Set{ClockVertex.Type}}()
-
-    function infer_equation(ieq, eq, is_initialization_equation)
-        empty!(varsbuf)
-        empty!(hyperedge)
-        # get variables in equation
-        SU.search_variables!(varsbuf, eq; is_atomic = MTKBase.OperatorIsAtomic{SU.Operator}())
-        # add the equation to the hyperedge
-        eq_node = if is_initialization_equation
-            ClockVertex.InitEquation(ieq)
-        else
-            ClockVertex.Equation(ieq)
-        end
-        push!(hyperedge, eq_node)
-        for var in varsbuf
-            idx = get(var_to_idx, var, nothing)
-            # if this is just a single variable, add it to the hyperedge
-            if idx isa Int
-                push!(hyperedge, ClockVertex.Variable(idx))
-                # we don't immediately `continue` here because this variable might be a
-                # `Sample` or similar and we want the clock information from it if it is.
-            end
-            # now we only care about synchronous operators
-            op, args = @match var begin
-                BSImpl.Term(; f, args) && if is_timevarying_operator(f)::Bool end => (f, args)
-                _ => continue
-            end
-
-            # arguments and corresponding time domains
-            tdomains = input_timedomain(op)::Vector{InputTimeDomainElT}
-            nargs = length(args)
-            ndoms = length(tdomains)
-            if nargs != ndoms
-                throw(ArgumentError("""
-                Operator $op applied to $nargs arguments $args but only returns $ndoms \
-                domains $tdomains from `input_timedomain`.
-                """))
-            end
-
-            # each relative clock mapping is only valid per operator application
-            empty!(relative_hyperedges)
-            for (arg, domain) in zip(args, tdomains)
-                empty!(arg_varsbuf)
-                empty!(arg_hyperedge)
-                # get variables in argument
-                SU.search_variables!(arg_varsbuf, arg; is_atomic = MTKBase.OperatorIsAtomic{Union{Differential, MTKBase.Shift}}())
-                # get hyperedge for involved variables
-                for v in arg_varsbuf
-                    vidx = get(var_to_idx, v, nothing)
-                    vidx === nothing && continue
-                    push!(arg_hyperedge, ClockVertex.Variable(vidx))
-                end
-
-                @match domain begin
-                    # If the time domain for this argument is a clock, then all variables in this edge have that clock.
-                    x::SciMLBase.AbstractClock => begin
-                        # add the clock to the edge
-                        push!(arg_hyperedge, ClockVertex.Clock(x))
-                        # add the edge to the graph
-                        add_edge!(inference_graph, arg_hyperedge)
-                    end
-                    # We only know that this time domain is inferred. Treat it as a unique domain, all we know is that the
-                    # involved variables have the same clock.
-                    InferredClock.Inferred() => add_edge!(inference_graph, arg_hyperedge)
-                    # All `InferredDiscrete` with the same `i` have the same clock (including output domain) so we don't
-                    # add the edge, and instead add this to the `relative_hyperedges` mapping.
-                    InferredClock.InferredDiscrete(i) => begin
-                        relative_edge = get!(Set{ClockVertex.Type}, relative_hyperedges, i)
-                        union!(relative_edge, arg_hyperedge)
-                    end
-                end
-            end
-
-            outdomain = output_timedomain(op)
-            @match outdomain begin
-                x::SciMLBase.AbstractClock => begin
-                    push!(hyperedge, ClockVertex.Clock(x))
-                end
-                InferredClock.Inferred() => nothing
-                InferredClock.InferredDiscrete(i) => begin
-                    buffer = get(relative_hyperedges, i, nothing)
-                    if buffer !== nothing
-                        union!(hyperedge, buffer)
-                        delete!(relative_hyperedges, i)
-                    end
-                end
-            end
-
-            for (_, relative_edge) in relative_hyperedges
-                add_edge!(inference_graph, relative_edge)
-            end
-        end
-
-        add_edge!(inference_graph, hyperedge)
-    end
     for (ieq, eq) in enumerate(MTKBase.equations(sys))
         infer_equation(ieq, eq, false)
     end
@@ -212,7 +227,9 @@ function infer_clocks!(ci::ClockInference)
             """))
         end
 
-        clock = partition[only(clockidxs)].:1
+        clock = Moshi.Match.@match partition[only(clockidxs)] begin
+            ClockVertex.Clock(clk) => clk
+        end
         for vert in partition
             Moshi.Match.@match vert begin
                 ClockVertex.Variable(i) => (var_domain[i] = clock)
@@ -275,19 +292,15 @@ function split_system(ci::ClockInference{S}) where {S}
     # populates clock_to_id and id_to_clock
     # checks if there is a continuous_id (for some reason? clock to id does this too)
     for (i, d) in enumerate(eq_domain)
-        cid = let cid_counter = cid_counter, id_to_clock = id_to_clock,
-            continuous_id = continuous_id
-
-            # Fill the clock_to_id dict as you go,
-            # ContinuousClock() => 1, ...
-            get!(clock_to_id, d) do
-                cid = (cid_counter[] += 1)
-                push!(id_to_clock, d)
-                if d == SciMLBase.ContinuousClock()
-                    continuous_id[] = cid
-                end
-                cid
+        # We don't use `get!` here because that desperately wants to box things
+        cid = get(clock_to_id, d, 0)
+        if iszero(cid)
+            cid = (cid_counter[] += 1)
+            push!(id_to_clock, d)
+            if d === SciMLBase.ContinuousClock()
+                continuous_id[] = cid
             end
+            clock_to_id[d] = cid
         end
         eq_to_cid[i] = cid
         resize_or_push!(cid_to_eq, i, cid)

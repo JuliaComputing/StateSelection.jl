@@ -31,10 +31,50 @@ function descend_lower_shift_varname(var, iv)
     end
 end
 
-function is_time_dependent_parameter(p, allps, iv)
-    return iv !== nothing && p in allps && iscall(p) &&
-           (operation(p) === getindex &&
-            is_time_dependent_parameter(arguments(p)[1], allps, iv) ||
-            (args = arguments(p); length(args)) == 1 && isequal(only(args), iv))
+function is_time_dependent_parameter(p::SymbolicT, allps::Set{SymbolicT}, iv::SymbolicT)
+    return p in allps && @match p begin
+        BSImpl.Term(; f, args) => begin
+            farg = args[1]
+            f === getindex && is_time_dependent_parameter(farg, allps, iv) ||
+                length(args) == 1 && isequal(farg, iv)
+        end
+        _ => false
+    end
 end
 
+const UNION_SPLIT_VAR_FIRST_ERR = """
+The first argument to `@union_split_var` must be of the form `var::Union{T1, T2}` where \
+`var` is a single variable (not an expression).
+"""
+
+"""
+    @union_split_var var::Union{T1, T2} begin; #= ... =#; end
+
+Manually dispatch the `begin..end` block based on the given type-annotation for `var`.
+`var` cannot be an expression.
+"""
+macro union_split_var(annotated_var::Expr, block::Expr)
+    @assert Meta.isexpr(annotated_var, :(::)) UNION_SPLIT_VAR_FIRST_ERR
+    @assert length(annotated_var.args) == 2 UNION_SPLIT_VAR_FIRST_ERR
+    var, type = annotated_var.args
+    @assert var isa Symbol UNION_SPLIT_VAR_FIRST_ERR
+    var = var::Symbol
+    @assert Meta.isexpr(type, :curly) UNION_SPLIT_VAR_FIRST_ERR
+    @assert type[1] == :Union UNION_SPLIT_VAR_FIRST_ERR
+
+    variants = @view type.args[2:end]
+    N = length(variants)
+    expr = Expr(:if)
+    cur_expr = expr
+    for (i, variant) in enumerate(variants)
+        push!(cur_expr.args, :($var isa $variant))
+        push!(cur_expr.args, block)
+        i == N && continue
+        new_expr = Expr(:elseif)
+        push!(cur_expr.args, new_expr)
+        cur_expr = new_expr
+    end
+    push!(cur_expr.args, :(error("Unexpected type $(typeof($var)) for variable $($var)")))
+
+    return esc(expr)
+end
