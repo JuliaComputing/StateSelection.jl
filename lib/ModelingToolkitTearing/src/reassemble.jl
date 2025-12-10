@@ -782,7 +782,7 @@ function codegen_equation!(eg::EquationGenerator,
             # current time. This works because we added one additional history element
             # in `add_additional_history!`.
             if isdisc
-                neweq = backshift_expr(neweq, idep)
+                neweq = backshift_expr(neweq, idep::SymbolicT)
             end
             push!(solved_eqs, neweq)
             push!(solved_vars, iv)
@@ -794,7 +794,7 @@ function codegen_equation!(eg::EquationGenerator,
         neweq = make_algebraic_equation(eq, total_sub)
         # For the same reason as solved equations (they are effectively the same)
         if isdisc
-            neweq = backshift_expr(neweq, idep)
+            neweq = backshift_expr(neweq, idep::SymbolicT)
         end
         push!(neweqs′, neweq)
         push!(eq_ordering, ieq)
