@@ -152,18 +152,21 @@ function (iec::InferEquationClosure)(ieq::Int, eq::Equation, is_initialization_e
         end
 
         outdomain = output_timedomain(op)
-        @match outdomain begin
-            x::SciMLBase.AbstractClock => begin
-                push!(hyperedge, ClockVertex.Clock(x))
-            end
-            InferredClock.Inferred() => nothing
-            InferredClock.InferredDiscrete(i) => begin
-                buffer = get(relative_hyperedges, i, nothing)
-                if buffer !== nothing
-                    union!(hyperedge, buffer)
-                    delete!(relative_hyperedges, i)
+        if outdomain isa SciMLBase.AbstractClock
+            push!(hyperedge, ClockVertex.Clock(outdomain))
+        elseif outdomain isa InferredTimeDomain
+            @match outdomain begin
+                InferredClock.Inferred() => nothing
+                InferredClock.InferredDiscrete(i) => begin
+                    buffer = get(relative_hyperedges, i, nothing)
+                    if buffer !== nothing
+                        union!(hyperedge, buffer)
+                        delete!(relative_hyperedges, i)
+                    end
                 end
             end
+        else
+            error("Unreachable reached!")
         end
 
         for (_, relative_edge) in relative_hyperedges
