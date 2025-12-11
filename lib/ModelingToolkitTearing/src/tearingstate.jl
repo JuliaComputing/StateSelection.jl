@@ -207,7 +207,7 @@ function TearingState(sys::System; check::Bool = true, sort_eqs::Bool = true)
                     addvar!(vi, VARIABLE)
                 end
             else
-                vv = collect(v)::Array{SymbolicT}
+                vv = vec(collect(v)::Array{SymbolicT})::Vector{SymbolicT}
                 union!(incidence, vv)
                 for vi in vv
                     addvar!(vi, VARIABLE)
@@ -456,7 +456,7 @@ end
 function lower_order_var(dervar::SymbolicT, t::SymbolicT)
     @match dervar begin
         BSImpl.Term(; f, args) && if f isa Differential end => begin
-            order = f.order::Int
+            order::Int = f.order::Int
             isone(order) && return args[1]
             return Differential(f.x, order - 1)(args[1])
         end
