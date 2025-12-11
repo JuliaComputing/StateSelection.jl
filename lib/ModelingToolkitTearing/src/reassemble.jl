@@ -782,7 +782,7 @@ function codegen_equation!(eg::EquationGenerator,
             # current time. This works because we added one additional history element
             # in `add_additional_history!`.
             if isdisc
-                neweq = backshift_expr(neweq, idep::SymbolicT)
+                neweq = backshift_expr(neweq, idep::SymbolicT)::Equation
             end
             push!(solved_eqs, neweq)
             push!(solved_vars, iv)
@@ -982,7 +982,7 @@ function update_simplified_system!(
     end
     @set! sys.unknowns = unknowns
 
-    obs = tearing_hacks(sys, obs, unknowns, neweqs; array = array_hack)
+    obs = (@invokelatest tearing_hacks(sys, obs, unknowns, neweqs; array = array_hack))::Vector{Equation}
 
     @set! sys.eqs = neweqs
     @set! sys.observed = obs
@@ -1240,7 +1240,7 @@ Backshift the given expression `ex`.
 function backshift_expr(ex, iv)
     ex isa SymbolicT || return ex
     return descend_lower_shift_varname_with_unit(
-        MTKBase.simplify_shifts(MTKBase.distribute_shift(Shift(iv, -1)(ex))), iv)
+        MTKBase.simplify_shifts(MTKBase.distribute_shift(Shift(iv, -1)(ex))), iv)::SymbolicT
 end
 
 function backshift_expr(ex::Equation, iv)
@@ -1298,26 +1298,30 @@ function tearing_hacks(sys, obs, unknowns, neweqs; array = true)
         rhs = eq.rhs
 
         array || continue
-        iscall(lhs) || continue
-        operation(lhs) === getindex || continue
-        SU.shape(lhs) isa SU.Unknown && continue
-        arg1 = arguments(lhs)[1]
-        cnt = get(arr_obs_occurrences, arg1, 0)
-        arr_obs_occurrences[arg1] = cnt + 1
-        continue
+        Moshi.Match.@match lhs begin
+            BSImpl.Term(; f, args) && if f === getindex end => begin
+                arg1 = args[1]
+                cnt = get(arr_obs_occurrences, arg1, 0)
+                arr_obs_occurrences[arg1] = cnt + 1
+            end
+            _ => nothing
+        end
     end
 
     # count variables in unknowns if they are scalarized forms of variables
     # also present as observed. e.g. if `x[1]` is an unknown and `x[2] ~ (..)`
     # is an observed equation.
     for sym in unknowns
-        iscall(sym) || continue
-        operation(sym) === getindex || continue
-        SU.shape(sym) isa SU.Unknown && continue
-        arg1 = arguments(sym)[1]
-        cnt = get(arr_obs_occurrences, arg1, 0)
-        cnt == 0 && continue
-        arr_obs_occurrences[arg1] = cnt + 1
+        Moshi.Match.@match sym begin
+            BSImpl.Term(; f, args, shape) && if f === getindex end => begin
+                shape isa SU.Unknown && continue
+                arg1 = args[1]
+                cnt = get(arr_obs_occurrences, arg1, 0)
+                cnt == 0 && continue
+                arr_obs_occurrences[arg1] = cnt + 1
+            end
+            _ => nothing
+        end
     end
 
     obs_arr_eqs = Equation[]
