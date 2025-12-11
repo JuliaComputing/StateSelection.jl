@@ -20,14 +20,18 @@ function descend_lower_shift_varname_with_unit(var, iv)
     MTKBase._with_unit(descend_lower_shift_varname, var, iv, iv)
 end
 function descend_lower_shift_varname(var, iv)
-    iscall(var) || return var
-    op = operation(var)
-    if op isa Shift
-        return MTKBase.shift2term(var)
-    else
-        args = arguments(var)
-        args = map(Base.Fix2(descend_lower_shift_varname, iv), args)
-        return SU.maketerm(SymbolicT, op, args, SU.metadata(var))
+    @match var begin
+        BSImpl.Term(; f, args) && if f isa Shift end => MTKBase.shift2term(var)
+        if iscall(var) end => begin
+            args = arguments(var)
+            _args = SU.ArgsT{VartypeT}()
+            sizehint!(_args, length(args))
+            for arg in args
+                push!(_args, descend_lower_shift_varname(arg, iv))
+            end
+            return SU.maketerm(SymbolicT, operation(var), _args, SU.metadata(var))
+        end
+        _ => return var
     end
 end
 
