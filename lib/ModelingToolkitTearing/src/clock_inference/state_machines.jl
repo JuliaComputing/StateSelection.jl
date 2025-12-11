@@ -76,14 +76,6 @@ for (s, T) in [(:timeInState, :Real),
     @eval begin
         $s(x) = wrap(term($s, x))
         SymbolicUtils.promote_symtype(::typeof($s), ::Type{S}) where {S} = $T
-        function SymbolicUtils.show_call(io, ::typeof($s), args)
-            if isempty(args)
-                print(io, $s, "()")
-            else
-                arg = only(args)
-                print(io, $s, "(", arg isa Number ? arg : nameof(arg), ")")
-            end
-        end
     end
     if s != :activeState
         @eval $s() = wrap(term($s))

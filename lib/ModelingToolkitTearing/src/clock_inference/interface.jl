@@ -75,7 +75,7 @@ function system_subset(ts::TearingState, ieqs::Vector{Int}, iieqs::Vector{Int}, 
     @set! ts.structure = system_subset(ts.structure, ieqs, ivars)
     if all(eq -> eq.rhs isa StateMachineOperator, MTKBase.get_eqs(ts.sys))
         names = Symbol[]
-        for eq in get_eqs(ts.sys)
+        for eq in MTKBase.get_eqs(ts.sys)
             if eq.lhs isa Transition
                 push!(names, first(MTKBase.namespace_hierarchy(nameof(eq.rhs.from))))
                 push!(names, first(MTKBase.namespace_hierarchy(nameof(eq.rhs.to))))
