@@ -560,7 +560,7 @@ function get_linear_scc_linsol(alg_eqs::BitSet, alg_vars::Vector{Int}, neweqs::V
             end
             # Substitute solved differential equations
             resid = Symbolics.fixpoint_sub(
-                resid, total_sub; operator = MTKBase.Shift)
+                resid, total_sub, MTKBase.Shift)
             # Substitute solved equations
             resid = SU.substitute(resid, solved_eqs_sub)
             push!(resids, resid)
@@ -580,7 +580,7 @@ function get_linear_scc_linsol(alg_eqs::BitSet, alg_vars::Vector{Int}, neweqs::V
         end
         # Substitute solved differential equations
         resid = Symbolics.fixpoint_sub(
-            resid, total_sub; operator = MTKBase.Shift)
+            resid, total_sub, MTKBase.Shift)
         # Substitute solved equations
         resid = SU.substitute(resid, solved_eqs_sub)
         # Standard `linear_expansion`-based process
@@ -821,7 +821,7 @@ Generate a first-order differential equation whose LHS is `dx`.
 """
 function make_differential_equation(var, dx, eq, total_sub)
     v1 = Symbolics.symbolic_linear_solve(eq, var)::SymbolicT
-    v2 = Symbolics.fixpoint_sub(v1, total_sub; operator = MTKBase.Shift)
+    v2 = Symbolics.fixpoint_sub(v1, total_sub, MTKBase.Shift)
     v3 = MTKBase.simplify_shifts(v2)
     dx ~ v3
 end
@@ -851,7 +851,7 @@ function make_solved_equation(var, eq, total_sub; simplify = false)
         return var ~ MTKBase.simplify_shifts(Symbolics.fixpoint_sub(
             simplify ?
             Symbolics.simplify(rhs) : rhs,
-            total_sub; operator = MTKBase.Shift))
+            total_sub, MTKBase.Shift))
     end
 end
 
