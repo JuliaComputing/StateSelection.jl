@@ -58,6 +58,13 @@ mutable struct TearingState <: StateSelection.TransformationState{System}
     """
     additional_observed::Vector{Equation}
     statemachines::Vector{System}
+    """
+    Source information for each equation in the `TearingState`. `Vector{Symbol}` for each
+    equation representing the path of the subsystem to which it belongs. Empty entries
+    indicate unknown source. If this field is empty, either the system has no equations
+    or source information is unknown.
+    """
+    eqs_source::Vector{Vector{Symbol}}
 end
 
 function Base.show(io::IO, state::TearingState)
@@ -83,15 +90,37 @@ function Base.push!(ev::EquationsView, eq)
     push!(ev.ts.extra_eqs, eq)
 end
 
-function TearingState(sys::System; check::Bool = true, sort_eqs::Bool = true)
+function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationSourceInformation} = nothing; check::Bool = true, sort_eqs::Bool = true)
     # flatten system
-    sys = MTKBase.flatten(sys)
+    if source_info === nothing
+        sys = MTKBase.flatten(sys)
+    else
+        @assert isempty(MTKBase.get_systems(sys)) """
+        If `source_info` is provided to `TearingState`, the system must be flattened.
+        """
+    end
     sys = MTKBase.discrete_unknowns_to_parameters(sys)
     sys = MTKBase.discover_globalscoped(sys)
     MTKBase.check_no_parameter_equations(sys)
     iv = MTKBase.get_iv(sys)
+    sources = Vector{Symbol}[]
     # flatten array equations
-    eqs = MTKBase.flatten_equations(equations(sys))
+    if source_info === nothing
+        eqs = MTKBase.flatten_equations(equations(sys))
+    else
+        eqs = Equation[]
+        @assert length(equations(sys)) == length(source_info.eqs_source) """
+        Mismatch between source information provided to `TearingState` and the structure \
+        of the system.
+        """
+        for (eq, src) in zip(equations(sys), source_info.eqs_source)
+            scal_eq = MTKBase.flatten_equation(eq)
+            append!(eqs, scal_eq)
+            for _ in scal_eq
+                push!(sources, src)
+            end
+        end
+    end
     original_eqs = copy(eqs)
     neqs = length(eqs)
     param_derivative_map = Dict{SymbolicT, SymbolicT}()
@@ -234,6 +263,9 @@ function TearingState(sys::System; check::Bool = true, sort_eqs::Bool = true)
         eqs = eqs[sortidxs]
         original_eqs = original_eqs[sortidxs]
         symbolic_incidence = symbolic_incidence[sortidxs]
+        if !isempty(sources)
+            sources = sources[sortidxs]
+        end
     end
 
     dervaridxs = OrderedSet{Int}()
@@ -262,7 +294,7 @@ function TearingState(sys::System; check::Bool = true, sort_eqs::Bool = true)
     structure = SystemStructure(complete(var_to_diff), complete(eq_to_diff),
                                 complete(graph), nothing, var_types, false)
     return TearingState(sys, fullvars, structure, Equation[], param_derivative_map,
-                        no_deriv_params, original_eqs, Equation[], typeof(sys)[])
+                        no_deriv_params, original_eqs, Equation[], typeof(sys)[], sources)
 end
 
 function sort_fullvars(fullvars::Vector{SymbolicT}, dervaridxs::Vector{Int}, var_types::Vector{VariableType}, @nospecialize(iv::Union{SymbolicT, Nothing}))
