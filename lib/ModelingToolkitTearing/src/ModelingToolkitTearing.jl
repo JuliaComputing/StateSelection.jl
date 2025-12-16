@@ -26,6 +26,7 @@ using Symbolics: SymbolicT, VartypeT
 using SymbolicUtils: BSImpl, unwrap
 using SciMLBase: LinearProblem
 using SparseArrays: nonzeros
+import LinearAlgebra
 
 const TimeDomain = SciMLBase.AbstractClock
 
