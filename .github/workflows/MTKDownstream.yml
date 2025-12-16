@@ -61,6 +61,8 @@ jobs:
         shell: julia --color=yes --check-bounds=yes --depwarn=yes --project=downstream {0}
         run: |
           using Pkg
+          Pkg.status(; mode = Pkg.PKGMODE_MANIFEST)
+          @info pwd()
           @info "dev StateSelection.jl"
           Pkg.develop(; path = ".")
           @info "dev ModelingToolkitTearing.jl"
