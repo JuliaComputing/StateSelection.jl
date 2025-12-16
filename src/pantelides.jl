@@ -66,7 +66,7 @@ _canchoose(diffvars::Nothing, var::Integer) = true
 
 Perform Pantelides algorithm.
 """
-function pantelides!(state::TransformationState; finalize = true, maxiters = 8000, eqfilter = eq->true, varfilter = var->true, _...)
+function pantelides!(state::TransformationState; finalize = true, maxiters = 8000, eqfilter = eq->true, varfilter = var->true, kw...)
     (; graph, solvable_graph, var_to_diff, eq_to_diff) = state.structure
     neqs = nsrcs(graph)
     nvars = nv(var_to_diff)
@@ -125,7 +125,7 @@ function pantelides!(state::TransformationState; finalize = true, maxiters = 800
                 ecolor[eq] || continue
                 # introduce a new equation
                 neqs += 1
-                eq_derivative!(state, eq)
+                eq_derivative!(state, eq; kw...)
             end
 
             for var in eachindex(vcolor)
