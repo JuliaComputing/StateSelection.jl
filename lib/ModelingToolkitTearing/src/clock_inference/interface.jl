@@ -34,10 +34,6 @@ function mark_discrete(state::StateSelection.TransformationState)
     unimplemented()
 end
 
-function postprocess_clock_inference(ci::ClockInference{TearingState}, state::TearingState)
-    substitute_sample_time(ci, state)
-end
-
 function error_sample_time(eq)
     error("$eq\ncontains `SampleTime` but it is not an Inferred discrete equation.")
 end

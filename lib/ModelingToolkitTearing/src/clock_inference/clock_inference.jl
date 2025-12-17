@@ -199,6 +199,10 @@ function infer_clocks!(ci::ClockInference)
                 unshifted = args[1]
                 add_edge!(inference_graph, (
                     ClockVertex.Variable(i), ClockVertex.Variable(var_to_idx[unshifted])))
+                td = get_time_domain(unshifted)
+                if td isa TimeDomain
+                    add_edge!(inference_graph, (ClockVertex.Variable(i), ClockVertex.Clock(td)))
+                end
             end
             _ => nothing
         end
