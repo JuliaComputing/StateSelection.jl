@@ -26,6 +26,7 @@ using Symbolics: SymbolicT, VartypeT
 using SymbolicUtils: BSImpl, unwrap
 using SciMLBase: LinearProblem
 using SparseArrays: nonzeros
+import LinearAlgebra
 
 const TimeDomain = SciMLBase.AbstractClock
 
@@ -53,17 +54,106 @@ abstract type ReassembleAlgorithm end
 
 include("reassemble.jl")
 
-function MTKBase.unhack_observed(obseqs::Vector{Equation}, eqs::Vector{Equation})
-    mask = trues(length(obseqs))
+function MTKBase.unhack_system(sys::System)
+    # Observed are copied by the masking operation
+    obseqs = observed(sys)
+    eqs = copy(equations(sys))
+    obs_mask = trues(length(obseqs))
     for (i, eq) in enumerate(obseqs)
-        mask[i] = @match eq.rhs begin
+        obs_mask[i] = @match eq.rhs begin
             BSImpl.Term(; f) => f !== change_origin
             _ => true
         end
     end
+    obseqs = obseqs[obs_mask]
 
-    obseqs = obseqs[mask]
-    return obseqs, eqs
+    # Map from ldiv operation to index of the equations where it is the RHS. A
+    # positive index is into `obseqs`, a negative index is into `eqs`. The variable
+    # order for the ldiv comes from the LHS of the corresponding equations.
+    inline_linear_scc_map = Dict{SymbolicT, Vector{Int}}()
+
+    for (i, eq) in enumerate(obseqs)
+        populate_inline_scc_map!(inline_linear_scc_map, eq, i, false)
+    end
+    for (i, eq) in enumerate(eqs)
+        populate_inline_scc_map!(inline_linear_scc_map, eq, i, true)
+    end
+
+    # Now, we want to turn all inlined linear SCCs into algebraic equations. If an element
+    # of the SCC is a differential variable, we'll introduce the `toterm` as a new algebraic.
+    # Otherwise, the observed equation is removed.
+    resize!(obs_mask, length(obseqs))
+    fill!(obs_mask, true)
+    additional_eqs = Equation[]
+    additional_vars = SymbolicT[]
+
+    # Also need to update schedule
+    sched = MTKBase.get_schedule(sys)
+    if sched isa MTKBase.Schedule
+        sched = copy(sched)
+    end
+    for (linsolve, idxs) in inline_linear_scc_map
+        A, b = @match linsolve begin
+            BSImpl.Term(; args) => args
+        end
+        A = collect(A)::Matrix{SymbolicT}
+        b = collect(b)::Vector{SymbolicT}
+        x = Vector{SymbolicT}(undef, length(b))
+        for (i, idx) in enumerate(idxs)
+            is_obs = idx > 0
+            idx = abs(idx)
+            if is_obs
+                var = obseqs[idx].lhs
+                x[i] = var
+                obs_mask[idx] = false
+            else
+                var = MTKBase.default_toterm(eqs[idx].lhs)
+                if sched isa MTKBase.Schedule
+                    sched.dummy_sub[eqs[idx].lhs] = x[i] = var
+                end
+                eqs[idx] = eqs[idx].lhs ~ var
+            end
+            push!(additional_vars, var)
+        end
+
+        resid = A * x - b
+        for res in resid
+            push!(additional_eqs, Symbolics.COMMON_ZERO ~ res)
+        end
+    end
+    obseqs = obseqs[obs_mask]
+    append!(eqs, additional_eqs)
+
+    dvs = [unknowns(sys); additional_vars]
+
+    @set! sys.observed = obseqs
+    @set! sys.eqs = eqs
+    @set! sys.unknowns = dvs
+    @set! sys.schedule = sched
+    return sys
+end
+
+function populate_inline_scc_map!(
+        inline_linear_scc_map::Dict{SymbolicT, Vector{Int}}, eq::Equation, eq_i::Int,
+        neg::Bool)
+    @match eq.rhs begin
+        BSImpl.Term(; f, args) && if f === getindex && length(args) == 2 end => begin
+            maybe_ldiv = args[1]
+            _idx = args[2]
+            @match maybe_ldiv begin
+                BSImpl.Term(; f) && if f === INLINE_LINEAR_SCC_OP end => begin
+                    ldiv = maybe_ldiv
+                    len = length(ldiv)
+                    buffer = get!(() -> zeros(Int, len), inline_linear_scc_map, ldiv)
+                    idx = unwrap_const(_idx)::Int
+                    buffer[idx] = ifelse(neg, -eq_i, eq_i)
+                end
+                _ => nothing
+            end
+        end
+        _ => nothing
+    end
+    
 end
 
 include("clock_inference/clock.jl")
