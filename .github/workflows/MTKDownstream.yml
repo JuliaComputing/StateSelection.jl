@@ -1,0 +1,77 @@
+name: "Test ModelingToolkit"
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - 'docs/**'
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'docs/**'
+      - 'benchmark/**'
+
+concurrency:
+  # Skip intermediate builds: always, but for the master branch.
+  # Cancel intermediate builds: always, but for the master branch.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+jobs:
+  tests:
+    name: "Tests"
+    strategy:
+      fail-fast: false
+      matrix:
+        version:
+          - "1"
+          - "lts"
+          - "pre"
+        group:
+          - InterfaceI
+          - InterfaceII
+          - Initialization
+          - SymbolicIndexingInterface
+          - Extensions
+          - Downstream
+          - FMI
+    runs-on: ${{ vars.USE_SELF_HOSTED == 'true' && 'self-hosted' || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: "Setup Julia ${{ matrix.version }}"
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: "${{ matrix.version }}"
+          arch: "${{ runner.arch }}"
+      - uses: julia-actions/cache@v2
+        if: ${{ vars.USE_SELF_HOSTED != 'true' }}
+        with:
+          token: "${{ secrets.GITHUB_TOKEN }}"
+      - name: Clone ModelingToolkit
+        uses: actions/checkout@v6
+        with:
+          repository: SciML/ModelingToolkit.jl
+          path: downstream
+      - name: "Test ModelingToolkit/${{ matrix.group }}"
+        env:
+          GROUP: ${{ matrix.group }}
+          JULIA_PKG_PRECOMPILE_AUTO: 0
+        shell: julia --color=yes --check-bounds=yes --depwarn=yes --project=downstream {0}
+        run: |
+          using Pkg
+          @info "dev StateSelection.jl"
+          Pkg.develop(; path = ".")
+          @info "dev ModelingToolkitTearing.jl"
+          Pkg.develop(; path = "lib/ModelingToolkitTearing")
+          Pkg.test("ModelingToolkit")
+      - uses: julia-actions/julia-processcoverage@v1
+        with:
+          directories: "src,lib/ModelingToolkitTearing/src"
+      - name: "Report Coverage with Codecov"
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          token: "${{ secrets.CODECOV_TOKEN }}"
+          fail_ci_if_error: true
