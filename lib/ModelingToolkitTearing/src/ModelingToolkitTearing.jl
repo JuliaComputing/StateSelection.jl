@@ -71,12 +71,17 @@ function MTKBase.unhack_system(sys::System)
     # positive index is into `obseqs`, a negative index is into `eqs`. The variable
     # order for the ldiv comes from the LHS of the corresponding equations.
     inline_linear_scc_map = Dict{SymbolicT, Vector{Int}}()
+    # Sometimes the same linearsolve is present in the RHS of an observed equation
+    # (typically dummy derivative) and the RHs of a differential equation (the corresponding
+    # dummy derivative equation). This requires maintaining a list of the variables solved
+    # for by each inline linsolve, so duplicates can be effectively handled.
+    inline_linear_scc_sub_map = Dict{SymbolicT, Vector{SymbolicT}}()
 
     for (i, eq) in enumerate(obseqs)
-        populate_inline_scc_map!(inline_linear_scc_map, eq, i, false)
+        populate_inline_scc_map!(inline_linear_scc_map, inline_linear_scc_sub_map, eq, i, false)
     end
     for (i, eq) in enumerate(eqs)
-        populate_inline_scc_map!(inline_linear_scc_map, eq, i, true)
+        populate_inline_scc_map!(inline_linear_scc_map, inline_linear_scc_sub_map, eq, i, true)
     end
 
     # Now, we want to turn all inlined linear SCCs into algebraic equations. If an element
@@ -124,6 +129,21 @@ function MTKBase.unhack_system(sys::System)
     obseqs = obseqs[obs_mask]
     append!(eqs, additional_eqs)
 
+    for (i, eq) in enumerate(eqs)
+        ldiv, idx, is_ldiv = maybe_extract_inline_linsolve(eq.rhs)
+        is_ldiv || continue
+        new_rhs = inline_linear_scc_sub_map[ldiv][idx]
+        eqs[i] = eq.lhs ~ new_rhs
+    end
+
+    if sched isa MTKBase.Schedule
+        for (k, v) in sched.dummy_sub
+            ldiv, idx, is_ldiv = maybe_extract_inline_linsolve(v)
+            is_ldiv || continue
+            sched.dummy_sub[k] = inline_linear_scc_sub_map[ldiv][idx]
+        end
+    end
+
     dvs = [unknowns(sys); additional_vars]
 
     @set! sys.observed = obseqs
@@ -134,26 +154,43 @@ function MTKBase.unhack_system(sys::System)
 end
 
 function populate_inline_scc_map!(
-        inline_linear_scc_map::Dict{SymbolicT, Vector{Int}}, eq::Equation, eq_i::Int,
-        neg::Bool)
-    @match eq.rhs begin
+    inline_linear_scc_map::Dict{SymbolicT, Vector{Int}},
+    inline_linear_scc_sub_map::Dict{SymbolicT, Vector{SymbolicT}}, eq::Equation, eq_i::Int,
+    is_diffeq::Bool)
+    is_diffeq && SU.isconst(eq.lhs) && return eq
+
+    ldiv, idx, is_ldiv = maybe_extract_inline_linsolve(eq.rhs)
+    is_ldiv || return
+    len = length(ldiv)
+    buffer = get!(() -> zeros(Int, len), inline_linear_scc_map, ldiv)
+    sub_buffer = get!(() -> fill(Symbolics.COMMON_ZERO, len), inline_linear_scc_sub_map, ldiv)
+    if !iszero(buffer[idx])
+        is_diffeq && return
+        throw(ArgumentError("""
+        Found multiple inline linear solves solving the same variable. \
+        This should not be possible. Please open an issue in \
+        `ModelingToolkit.jl` with an MWE.
+        """))
+    end
+    buffer[idx] = ifelse(is_diffeq, -eq_i, eq_i)
+    sub_buffer[idx] = MTKBase.default_toterm(eq.lhs)
+end
+
+function maybe_extract_inline_linsolve(rhs::SymbolicT)
+    @match rhs begin
         BSImpl.Term(; f, args) && if f === getindex && length(args) == 2 end => begin
             maybe_ldiv = args[1]
             _idx = args[2]
             @match maybe_ldiv begin
                 BSImpl.Term(; f) && if f === INLINE_LINEAR_SCC_OP end => begin
-                    ldiv = maybe_ldiv
-                    len = length(ldiv)
-                    buffer = get!(() -> zeros(Int, len), inline_linear_scc_map, ldiv)
-                    idx = unwrap_const(_idx)::Int
-                    buffer[idx] = ifelse(neg, -eq_i, eq_i)
+                    return maybe_ldiv, unwrap_const(_idx)::Int, true
                 end
                 _ => nothing
             end
         end
         _ => nothing
     end
-    
+    return Symbolics.COMMON_ZERO, 0, false
 end
 
 include("clock_inference/clock.jl")
