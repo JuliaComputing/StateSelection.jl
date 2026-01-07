@@ -551,7 +551,6 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
         for (varidx, var) in enumerate(vars)
             a, resid, islinear = Symbolics.linear_expansion(resid, var)
             islinear || return nothing
-            @assert islinear
             A[eqidx, varidx] = a
         end
         # `-` is important! `b` is on the other side of the equality.

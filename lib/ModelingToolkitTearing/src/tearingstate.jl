@@ -287,7 +287,24 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
     # build incidence graph
     graph = build_incidence_graph(length(fullvars), symbolic_incidence, var2idx)
 
+    # Identify unknowns that do not appear in any equations and are thus not present in
+    # `fullvars`. The bindings and initial conditions for these variables should be removed.
+    for v in fullvars
+        delete!(dvs, v)
+        arr, _ = MTKBase.split_indexed_var(v)
+        delete!(dvs, arr)
+    end
+    new_binds = copy(parent(bindings(sys)))
+    new_ics = copy(initial_conditions(sys))
+    for var in dvs
+        arr, _ = MTKBase.split_indexed_var(var)
+        delete!(new_binds, arr)
+        delete!(new_ics, arr)
+    end
+
     @set! sys.eqs = eqs
+    @set! sys.bindings = new_binds
+    @set! sys.initial_conditions = new_ics
 
     eq_to_diff = StateSelection.DiffGraph(nsrcs(graph))
 
