@@ -71,17 +71,12 @@ function MTKBase.unhack_system(sys::System)
     # positive index is into `obseqs`, a negative index is into `eqs`. The variable
     # order for the ldiv comes from the LHS of the corresponding equations.
     inline_linear_scc_map = Dict{SymbolicT, Vector{Int}}()
-    # Sometimes the same linearsolve is present in the RHS of an observed equation
-    # (typically dummy derivative) and the RHs of a differential equation (the corresponding
-    # dummy derivative equation). This requires maintaining a list of the variables solved
-    # for by each inline linsolve, so duplicates can be effectively handled.
-    inline_linear_scc_sub_map = Dict{SymbolicT, Vector{SymbolicT}}()
 
     for (i, eq) in enumerate(obseqs)
-        populate_inline_scc_map!(inline_linear_scc_map, inline_linear_scc_sub_map, eq, i, false)
+        populate_inline_scc_map!(inline_linear_scc_map, eq, i, false)
     end
     for (i, eq) in enumerate(eqs)
-        populate_inline_scc_map!(inline_linear_scc_map, inline_linear_scc_sub_map, eq, i, true)
+        populate_inline_scc_map!(inline_linear_scc_map, eq, i, true)
     end
 
     # Now, we want to turn all inlined linear SCCs into algebraic equations. If an element
@@ -91,6 +86,7 @@ function MTKBase.unhack_system(sys::System)
     fill!(obs_mask, true)
     additional_eqs = Equation[]
     additional_vars = SymbolicT[]
+    additional_subs = Dict{SymbolicT, SymbolicT}()
 
     # Also need to update schedule
     sched = MTKBase.get_schedule(sys)
@@ -119,6 +115,7 @@ function MTKBase.unhack_system(sys::System)
                 eqs[idx] = eqs[idx].lhs ~ var
             end
             push!(additional_vars, var)
+            additional_subs[linsolve[i]] = x[i]
         end
 
         resid = A * x - b
@@ -126,22 +123,14 @@ function MTKBase.unhack_system(sys::System)
             push!(additional_eqs, Symbolics.COMMON_ZERO ~ res)
         end
     end
+    subst = SU.Substituter{false}(additional_subs, SU.default_substitute_filter)
     obseqs = obseqs[obs_mask]
+    map!(subst, obseqs, obseqs)
+    map!(subst, additional_eqs, additional_eqs)
     append!(eqs, additional_eqs)
 
-    for (i, eq) in enumerate(eqs)
-        ldiv, idx, is_ldiv = maybe_extract_inline_linsolve(eq.rhs)
-        is_ldiv || continue
-        new_rhs = inline_linear_scc_sub_map[ldiv][idx]
-        eqs[i] = eq.lhs ~ new_rhs
-    end
-
     if sched isa MTKBase.Schedule
-        for (k, v) in sched.dummy_sub
-            ldiv, idx, is_ldiv = maybe_extract_inline_linsolve(v)
-            is_ldiv || continue
-            sched.dummy_sub[k] = inline_linear_scc_sub_map[ldiv][idx]
-        end
+        map!(subst, values(sched.dummy_sub))
     end
 
     dvs = [unknowns(sys); additional_vars]
@@ -155,7 +144,7 @@ end
 
 function populate_inline_scc_map!(
     inline_linear_scc_map::Dict{SymbolicT, Vector{Int}},
-    inline_linear_scc_sub_map::Dict{SymbolicT, Vector{SymbolicT}}, eq::Equation, eq_i::Int,
+    eq::Equation, eq_i::Int,
     is_diffeq::Bool)
     is_diffeq && SU.isconst(eq.lhs) && return eq
 
@@ -163,7 +152,6 @@ function populate_inline_scc_map!(
     is_ldiv || return
     len = length(ldiv)
     buffer = get!(() -> zeros(Int, len), inline_linear_scc_map, ldiv)
-    sub_buffer = get!(() -> fill(Symbolics.COMMON_ZERO, len), inline_linear_scc_sub_map, ldiv)
     if !iszero(buffer[idx])
         is_diffeq && return
         throw(ArgumentError("""
@@ -173,7 +161,6 @@ function populate_inline_scc_map!(
         """))
     end
     buffer[idx] = ifelse(is_diffeq, -eq_i, eq_i)
-    sub_buffer[idx] = MTKBase.default_toterm(eq.lhs)
 end
 
 function maybe_extract_inline_linsolve(rhs::SymbolicT)
