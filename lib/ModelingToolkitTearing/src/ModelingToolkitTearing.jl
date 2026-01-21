@@ -123,6 +123,18 @@ function MTKBase.unhack_system(sys::System)
             push!(additional_eqs, Symbolics.COMMON_ZERO ~ res)
         end
     end
+    @assert length(additional_eqs) == length(additional_vars)
+    # If a linear SCC contains both `D(w)` and `w_t`, it'll contain the equation `D(w) ~ w_t`.
+    # When unhacking it, `D(w)` will be totermed into `w_t`. This, `additional_vars` contains
+    # two `w_t` and an equation that is `0 ~ 0`. Find the `0 ~ 0` equations, and remove them
+    # along with the duplicate variables.
+    # See https://github.com/SciML/ModelingToolkit.jl/issues/4196 for further details.
+    additional_eqs_mask = trues(length(additional_eqs))
+    for (i, eq) in enumerate(additional_eqs)
+        additional_eqs_mask[i] = !SU._iszero(eq.rhs)
+    end
+    additional_eqs = additional_eqs[additional_eqs_mask]
+    additional_vars = additional_vars[additional_eqs_mask]
     subst = SU.Substituter{false}(additional_subs, SU.default_substitute_filter)
     obseqs = obseqs[obs_mask]
     map!(subst, obseqs, obseqs)
