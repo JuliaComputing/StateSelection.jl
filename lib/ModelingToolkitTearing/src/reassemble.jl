@@ -434,12 +434,13 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
             linsol = get_linear_scc_linsol(state, escc, vscc, neweqs, var_eq_matching, total_sub, analytical_linear_scc_limit, simplify)
         end
         if linsol isa SymbolicT
-            for (i, (ieq, iv)) in enumerate(zip(escc, vscc))
-                var = substitute(fullvars[iv], total_sub)
+            for (j, (ieq, iv)) in enumerate(zip(escc, vscc))
                 ∫iv = diff_to_var[iv]
-                rhs = linsol[i]
-                eq = var ~ rhs
+                rhs = linsol[j]
                 if ∫iv isa Int
+                    order, lv = var_order(iv, diff_to_var)
+                    dx = D(fullvars[lv])
+                    eq = dx ~ rhs
                     # Differential equation
                     push!(eq_generator.neweqs′, eq)
                     push!(eq_generator.eq_ordering, ieq)
@@ -452,8 +453,10 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
                         rem_edge!(graph, e, iv)
                     end
 
-                    total_sub[var] = rhs
+                    total_sub[dx] = rhs
                 else
+                    var = substitute(fullvars[iv], total_sub)
+                    eq = var ~ rhs
                     push!(eq_generator.solved_eqs, eq)
                     push!(eq_generator.solved_vars, iv)
                 end
@@ -714,7 +717,6 @@ function codegen_equation!(eg::EquationGenerator,
         isnothing(D) && throw(UnexpectedDifferentialError(equations(sys)[ieq]))
         order, lv = var_order(iv, diff_to_var)
         dx = D(MTKBase.simplify_shifts(fullvars[lv]))
-
         neweq = make_differential_equation(var, dx, eq, total_sub)
         # We will add `neweq.lhs` to `total_sub`, so any equation involving it won't be
         # incident on it. Remove the edges incident on `iv` from the graph, and add
