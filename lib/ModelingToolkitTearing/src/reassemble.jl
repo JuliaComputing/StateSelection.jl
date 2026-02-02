@@ -373,7 +373,8 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
         var_eq_matching::Matching, full_var_eq_matching::Matching,
         var_sccs::Vector{Vector{Int}}, extra_eqs_vars::NTuple{2, Vector{Int}},
         iv::Union{SymbolicT, Nothing}, D::Union{Differential, Shift, Nothing};
-        simplify::Bool = false, inline_linear_sccs = false, analytical_linear_scc_limit = 2)
+        simplify::Bool = false, inline_linear_sccs = false, analytical_linear_scc_limit = 2,
+        allow_symbolic::Bool = false, allow_parameter::Bool = true)
     (; fullvars, sys, structure) = state
     (; solvable_graph, var_to_diff, eq_to_diff, graph) = structure
     eq_var_matching = invview(var_eq_matching)
@@ -522,7 +523,8 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
                                var_eq_matching::StateSelection.VarEqMatchingT,
                                total_sub::MTKBase.DerivativeDict{SymbolicT, Dict{SymbolicT, SymbolicT}},
                                analytical_linear_scc_limit::Int,
-                               simplify::Bool)::Union{Nothing, SymbolicT}
+                               simplify::Bool; allow_symbolic::Bool = false,
+                               allow_parameter::Bool = true)::Union{Nothing, SymbolicT}
     (; fullvars) = state
     # If the SCC is fully torn, don't bother generating a linsolve
     all_torn = true
@@ -533,6 +535,8 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
 
     N = length(alg_eqs)
     vars = Symbolics.fixpoint_sub(fullvars[alg_vars], total_sub; maxiters = max(length(total_sub), 10))
+
+    vars_in_A = Set{SymbolicT}()
     # Linear coefficients
     A = fill(Num(Symbolics.COMMON_ZERO), N, N)
     b = fill(Symbolics.COMMON_ZERO, N)
@@ -554,12 +558,15 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
         for (varidx, var) in enumerate(vars)
             a, resid, islinear = Symbolics.linear_expansion(resid, var)
             islinear || return nothing
+            SU.search_variables!(vars_in_A, a)
             A[eqidx, varidx] = a
         end
         # `-` is important! `b` is on the other side of the equality.
         b[eqidx] = -resid
     end
-    if N <= analytical_linear_scc_limit
+    if N <= analytical_linear_scc_limit && _check_allow_symbolic_parameter(
+            state, vars_in_A, allow_symbolic, allow_parameter
+        )
         lu = try
             Symbolics.sym_lu(A)
         catch err
@@ -572,6 +579,26 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
     A = SU.Const{VartypeT}(A)
     b = SU.Const{VartypeT}(b)
     return INLINE_LINEAR_SCC_OP(A, b)
+end
+
+function _check_allow_symbolic_parameter(
+        state::TearingState, vars_in_A::Set{SymbolicT}, allow_symbolic::Bool,
+        allow_parameter::Bool
+    )
+    if allow_symbolic
+        return true
+    end
+    if !allow_symbolic && !allow_parameter
+        return isempty(vars_in_A)
+    end
+    if !allow_symbolic
+        for v in state.fullvars
+            v in vars_in_A && return false
+            arr, isarr = MTKBase.split_indexed_var(v)
+            isarr && arr in vars_in_A && return false
+        end
+    end
+    return true
 end
 
 """
@@ -1026,7 +1053,9 @@ end
 function (alg::DefaultReassembleAlgorithm)(state::TearingState,
                                            tearing_result::StateSelection.TearingResult,
                                            mm::Union{CLIL.SparseMatrixCLIL,  Nothing};
-                                           fully_determined::Bool = true, kw...)
+                                           fully_determined::Bool = true,
+                                           allow_symbolic::Bool = false,
+                                           allow_parameter::Bool = true, kw...)
     (; simplify, array_hack, inline_linear_sccs, analytical_linear_scc_limit) = alg
     (; var_eq_matching, full_var_eq_matching, var_sccs) = tearing_result
 
@@ -1069,7 +1098,7 @@ function (alg::DefaultReassembleAlgorithm)(state::TearingState,
         nelim_var = generate_system_equations!(
             state, neweqs, var_eq_matching, full_var_eq_matching,
             var_sccs, extra_eqs_vars, iv, D; simplify, inline_linear_sccs,
-            analytical_linear_scc_limit)
+            analytical_linear_scc_limit, allow_symbolic, allow_parameter)
         state = reorder_vars!(
             state, var_eq_matching, var_sccs, eq_ordering, var_ordering, nelim_eq, nelim_var)
         # var_eq_matching and full_var_eq_matching are now invalidated
