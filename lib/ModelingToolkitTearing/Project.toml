@@ -1,7 +1,7 @@
 name = "ModelingToolkitTearing"
 uuid = "6bb917b9-1269-42b9-9f7c-b0dca72083ab"
-authors = ["Aayush Sabharwal <aayush.sabharwal@gmail.com>"]
 version = "1.2.6"
+authors = ["Aayush Sabharwal <aayush.sabharwal@gmail.com>"]
 
 [deps]
 BipartiteGraphs = "caf10ac8-0290-4205-88aa-f15908547e8d"
@@ -27,6 +27,7 @@ CommonSolve = "0.2"
 DocStringExtensions = "0.7, 0.8, 0.9"
 Graphs = "1"
 LinearAlgebra = "1"
+ModelingToolkit = "11"
 ModelingToolkitBase = "1.4"
 Moshi = "0.3"
 OffsetArrays = "1"
@@ -39,3 +40,10 @@ SymbolicIndexingInterface = "0.3"
 SymbolicUtils = "4.3"
 Symbolics = "7.1"
 julia = "1.10"
+
+[extras]
+ModelingToolkit = "961ee093-0014-501f-94e3-6117800e7a78"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test", "ModelingToolkit"]
