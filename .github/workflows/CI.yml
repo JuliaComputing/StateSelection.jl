@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
 jobs:
   test:
-    name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }} - ${{ github.event_name }}
+    name: Test ${{ matrix.pkg }} - Julia v${{ matrix.version }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     permissions: # needed to allow julia-actions/cache to proactively delete old caches that it has created
@@ -23,11 +23,14 @@ jobs:
       fail-fast: false
       matrix:
         version:
-          - 'nightly'
+          - '1'
         os:
           - ubuntu-latest
         arch:
           - x64
+        pkg:
+          - StateSelection
+          - ModelingToolkitTearing
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v1
@@ -35,14 +38,23 @@ jobs:
           version: ${{ matrix.version }}
           arch: ${{ matrix.arch }}
       - uses: julia-actions/cache@v1
-      - uses: julia-actions/julia-buildpkg@v1
-      - uses: julia-actions/julia-runtest@v1
-      - uses: julia-actions/julia-processcoverage@v1
-#      - uses: codecov/codecov-action@v4
-#        with:
-#          files: lcov.info
-#          token: ${{ secrets.CODECOV_TOKEN }}
-#          fail_ci_if_error: false
-#      - uses: julia-actions/julia-uploadcoveralls@v1
-#        env:
-#          COVERALLS_TOKEN: ${{ secrets.COVERALLS_TOKEN }}
+      - name: "Test ${{ matrix.pkg }}"
+        shell: julia --color=yes --check-bounds=yes --depwarn=yes {0}
+        env:
+          PKG_TO_TEST: ${{ matrix.pkg }}
+        run: |
+          using Pkg
+          const PKG = ENV["PKG_TO_TEST"]
+          if PKG == "StateSelection"
+            @info "Testing StateSelection"
+            Pkg.activate(".")
+            Pkg.test()
+          elseif PKG == "ModelingToolkitTearing"
+            @info "Testing ModelingToolkitTearing"
+            Pkg.activate("lib/ModelingToolkitTearing")
+            Pkg.develop(; path = ".")
+            Pkg.test()
+          else
+            @error "Unknown package" PKG
+            exit(1)
+          end
