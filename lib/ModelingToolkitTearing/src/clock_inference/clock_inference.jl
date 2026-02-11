@@ -3,7 +3,6 @@
     Equation(Int)
     InitEquation(Int)
     Clock(SciMLBase.AbstractClock)
-    AssertDiscrete
 end
 
 struct ClockInference{S <: StateSelection.TransformationState}
@@ -69,6 +68,8 @@ struct InferEquationClosure
     arg_hyperedge::Set{ClockVertex.Type}
     # mapping from `i` in `InferredDiscrete(i)` to the vertices in that inferred partition
     relative_hyperedges::Dict{Int, Set{ClockVertex.Type}}
+    # vertices that must be discrete
+    must_be_discrete::Set{ClockVertex.Type}
     var_to_idx::Dict{SymbolicT, Int}
     inference_graph::HyperGraph{ClockVertex.Type}
 end
@@ -76,12 +77,12 @@ end
 function InferEquationClosure(var_to_idx, inference_graph)
     InferEquationClosure(Set{SymbolicT}(), Set{SymbolicT}(), Set{ClockVertex.Type}(),
                          Set{ClockVertex.Type}(), Dict{Int, Set{ClockVertex.Type}}(),
-                         var_to_idx, inference_graph)
+                         Set{ClockVertex.Type}(), var_to_idx, inference_graph)
 end
 
 function (iec::InferEquationClosure)(ieq::Int, eq::Equation, is_initialization_equation::Bool)
     (; varsbuf, arg_varsbuf, hyperedge, arg_hyperedge, relative_hyperedges) = iec
-    (; var_to_idx, inference_graph) = iec
+    (; must_be_discrete, var_to_idx, inference_graph) = iec
     empty!(varsbuf)
     empty!(hyperedge)
     # get variables in equation
@@ -148,9 +149,8 @@ function (iec::InferEquationClosure)(ieq::Int, eq::Equation, is_initialization_e
                 InferredClock.InferredDiscrete(i) => begin
                     relative_edge = get!(Set{ClockVertex.Type}, relative_hyperedges, i)
                     union!(relative_edge, arg_hyperedge)
-                    # Ensure that this clock partition will be discrete. This is a separate
-                    # variant because I don't want to give `InferredDiscrete` too many meanings.
-                    push!(arg_hyperedge, ClockVertex.AssertDiscrete())
+                    # Ensure that this clock partition will be discrete.
+                    union!(must_be_discrete, arg_hyperedge)
                     add_edge!(inference_graph, arg_hyperedge)
                 end
             end
@@ -168,7 +168,7 @@ function (iec::InferEquationClosure)(ieq::Int, eq::Equation, is_initialization_e
                         union!(hyperedge, buffer)
                         delete!(relative_hyperedges, i)
                     end
-                    push!(hyperedge, ClockVertex.AssertDiscrete())
+                    union!(must_be_discrete, hyperedge)
                 end
             end
         else
@@ -222,11 +222,13 @@ function infer_clocks!(ci::ClockInference)
         infer_equation(ieq, eq, true)
     end
 
+    (; must_be_discrete) = infer_equation
+
     clock_partitions = Graphs.connected_components(inference_graph)
     for partition in clock_partitions
         clockidxs = findall(Base.Fix2(Moshi.Data.isa_variant, ClockVertex.Clock), partition)
         if isempty(clockidxs)
-            if any(isequal(ClockVertex.AssertDiscrete()), partition)
+            if any(in(must_be_discrete), partition)
                 throw(ExpectedDiscreteClockPartitionError(ts, partition, true))
             end
             push!(partition, ClockVertex.Clock(SciMLBase.ContinuousClock()))
@@ -246,7 +248,7 @@ function infer_clocks!(ci::ClockInference)
         clock = Moshi.Match.@match partition[only(clockidxs)] begin
             ClockVertex.Clock(clk) => clk
         end
-        if clock == SciMLBase.ContinuousClock() && any(isequal(ClockVertex.AssertDiscrete()), partition)
+        if clock == SciMLBase.ContinuousClock() && any(in(must_be_discrete), partition)
             throw(ExpectedDiscreteClockPartitionError(ts, partition, false))
         end
         for vert in partition
@@ -255,7 +257,6 @@ function infer_clocks!(ci::ClockInference)
                 ClockVertex.Equation(i) => (eq_domain[i] = clock)
                 ClockVertex.InitEquation(i) => (init_eq_domain[i] = clock)
                 ClockVertex.Clock(_) => nothing
-                ClockVertex.AssertDiscrete() => nothing
             end
         end
     end
