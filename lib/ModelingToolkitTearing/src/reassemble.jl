@@ -536,7 +536,6 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
     N = length(alg_eqs)
     vars = Symbolics.fixpoint_sub(fullvars[alg_vars], total_sub; maxiters = max(length(total_sub), 10))
 
-    vars_in_A = Set{SymbolicT}()
     # Linear coefficients
     A = fill(Num(Symbolics.COMMON_ZERO), N, N)
     b = fill(Symbolics.COMMON_ZERO, N)
@@ -558,14 +557,13 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
         for (varidx, var) in enumerate(vars)
             a, resid, islinear = Symbolics.linear_expansion(resid, var)
             islinear || return nothing
-            SU.search_variables!(vars_in_A, a)
             A[eqidx, varidx] = a
         end
         # `-` is important! `b` is on the other side of the equality.
         b[eqidx] = -resid
     end
     if N <= analytical_linear_scc_limit && _check_allow_symbolic_parameter(
-            state, vars_in_A, allow_symbolic, allow_parameter
+            state, A, allow_symbolic, allow_parameter
         )
         lu = try
             Symbolics.sym_lu(A)
@@ -579,26 +577,6 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
     A = SU.Const{VartypeT}(A)
     b = SU.Const{VartypeT}(b)
     return INLINE_LINEAR_SCC_OP(A, b)
-end
-
-function _check_allow_symbolic_parameter(
-        state::TearingState, vars_in_A::Set{SymbolicT}, allow_symbolic::Bool,
-        allow_parameter::Bool
-    )
-    if allow_symbolic
-        return true
-    end
-    if !allow_symbolic && !allow_parameter
-        return isempty(vars_in_A)
-    end
-    if !allow_symbolic
-        for v in state.fullvars
-            v in vars_in_A && return false
-            arr, isarr = MTKBase.split_indexed_var(v)
-            isarr && arr in vars_in_A && return false
-        end
-    end
-    return true
 end
 
 """
