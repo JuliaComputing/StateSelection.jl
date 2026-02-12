@@ -80,13 +80,134 @@ function StateSelection.linear_subsys_adjmat!(state::TearingState; kwargs...)
     return mm
 end
 
+function maybe_zeros_descend(ex::SymbolicT)
+    @match ex begin
+        BSImpl.AddMul(; variant) => return variant === SU.AddMulVariant.MUL
+        BSImpl.Term(; f) => return f === (^) || f === sin || f === adjoint || f === LinearAlgebra.dot || f === getindex
+        _ => return false
+    end
+end
+
+"""
+    $TYPEDEF
+
+Functor used by `query_maybe_zeros`.
+
+# Fields
+
+$TYPEDFIELDS
+"""
+struct MaybeZeroQueryFn{Z}
+    """
+    `MTKBase.maybe_zeros(sys)`
+    """
+    maybe_zeros::Z
+end
+
+"""
+    $METHODLIST
+
+Check if `ex` contains any expressions in `qf.maybe_zeros` as factors, or in places
+that could cause `ex` to be zero.
+"""
+function query_maybe_zeros(qf::MaybeZeroQueryFn, ex::SymbolicT)
+    return SU.query(qf, ex; recurse = maybe_zeros_descend)
+end
+function query_maybe_zeros(qf::MaybeZeroQueryFn, ex::AbstractArray)
+    return any(Base.Fix1(query_maybe_zeros, qf) ∘ unwrap, ex)
+end
+
+function (qf::MaybeZeroQueryFn)(ex::SymbolicT)
+    (; maybe_zeros) = qf
+    MTKBase.split_indexed_var(ex)[1] in maybe_zeros && return true
+    pred = in(maybe_zeros) ∘ first ∘ MTKBase.split_indexed_var
+    @match ex begin
+        BSImpl.AddMul(; dict, variant) && if variant === SU.AddMulVariant.MUL end => begin
+            return any(pred, keys(dict))
+        end
+        BSImpl.AddMul(; coeff, dict, variant) && if variant === SU.AddMulVariant.ADD end => begin
+            return SU._iszero(coeff) && all(Base.Fix1(query_maybe_zeros, qf), keys(dict))
+        end
+        BSImpl.Term(; f, args) => begin
+            if f === (^) || f === sin || f === adjoint || f === LinearAlgebra.dot
+                return any(pred, args)
+            elseif f === getindex
+                return args[1] in maybe_zeros
+            end
+            return false
+        end
+        _ => return false
+    end
+end
+
+"""
+    $METHODLIST
+
+Check if `x` is fully constant (not a symbolic expression or array thereof).
+"""
+query_all_const(x::SymbolicT) = SU.isconst(x)
+query_all_const(x::AbstractArray) = all(SU.isconst ∘ unwrap, x)
+
+"""
+    $METHODLIST
+
+Check if `denom` contains any vars present in `state.fullvars`.
+"""
+function query_any_vars(state::TearingState, denom, ::Nothing)
+    fullvars_set = Set{SymbolicT}(state.fullvars)
+    for v in state.fullvars
+        push!(fullvars_set, MTKBase.split_indexed_var(v)[1])
+    end
+    query_any_vars(state, denom, fullvars_set)
+end
+function query_any_vars(state::TearingState, denom::Union{SymbolicT, AbstractArray}, fullvars_set::Set{SymbolicT})
+    __allow_sym_par_cond = let fullvars_set = fullvars_set,
+        is_atomic = MTKBase.OperatorIsAtomic{SU.Operator}()
+        function allow_sym_par_cond(v)
+            is_atomic(v) && v in fullvars_set || SU.shape(v) isa SU.Unknown
+         end
+    end
+    if denom isa SymbolicT
+        return SU.query(__allow_sym_par_cond, denom)
+    else
+        return any(Base.Fix1(SU.query, __allow_sym_par_cond) ∘ unwrap, denom)
+    end
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Check if dividing by `denom` is allowed, given the restrictions imposed by `allow_parameter`
+and `allow_symbolic`. Also checks that expressions in `maybe_zeros(state.sys)` won't cause
+`denom` to be zero. `denom` may be a symbolic or array thereof.
+"""
+function _check_allow_symbolic_parameter(
+        state::TearingState, denom, allow_symbolic::Bool,
+        allow_parameter::Bool; fullvars_set::Union{Set{SymbolicT}, Nothing} = nothing
+    )
+    if allow_symbolic
+        return true
+    end
+    if !allow_symbolic && !allow_parameter
+        return query_all_const(denom)
+    end
+    if !allow_symbolic
+        maybe_zeros = MTKBase.maybe_zeros(state.sys)
+        query_maybe_zeros(MaybeZeroQueryFn(maybe_zeros), denom) && return false
+
+        query_any_vars(state, denom, fullvars_set) && return false
+    end
+    return true
+end
+
 function StateSelection.find_eq_solvables!(state::TearingState, ieq, to_rm = Int[], coeffs = nothing;
         may_be_zero = false,
         allow_symbolic = false, allow_parameter = true,
         conservative = false,
         kwargs...)
-    fullvars = state.fullvars
+    (; fullvars) = state
     (; graph, solvable_graph) = state.structure
+
     eq = equations(state)[ieq]
     term = unwrap(eq.rhs - eq.lhs)
     all_int_vars = true
@@ -100,12 +221,6 @@ function StateSelection.find_eq_solvables!(state::TearingState, ieq, to_rm = Int
             _ => nothing
         end
     end
-    __allow_sym_par_cond = let fullvars_set = fullvars_set,
-        is_atomic = MTKBase.OperatorIsAtomic{SU.Operator}()
-        function allow_sym_par_cond(v)
-            is_atomic(v) && v in fullvars_set || SU.shape(v) isa SU.Unknown
-         end
-    end
     for j in 𝑠neighbors(graph, ieq)
         var = fullvars[j]
         MTKBase.isirreducible(var) && (all_int_vars = false; continue)
@@ -114,15 +229,8 @@ function StateSelection.find_eq_solvables!(state::TearingState, ieq, to_rm = Int
         islinear || (all_int_vars = false; continue)
         if !SU.isconst(a)
             all_int_vars = false
-            if !allow_symbolic
-                if allow_parameter
-                    # if any of the variables in `a` are present in fullvars (taking into account arrays)
-                    if SU.query(__allow_sym_par_cond, a)
-                        continue
-                    end
-                else
-                    continue
-                end
+            if !_check_allow_symbolic_parameter(state, a, allow_symbolic, allow_parameter; fullvars_set)
+                continue
             end
             add_edge!(solvable_graph, ieq, j)
             continue
