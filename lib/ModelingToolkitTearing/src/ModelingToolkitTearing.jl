@@ -54,7 +54,16 @@ abstract type ReassembleAlgorithm end
 
 include("reassemble.jl")
 
+struct UnhackSystemCacheKey end
+
 function MTKBase.unhack_system(sys::System)
+    cache = getmetadata(sys, MTKBase.MutableCacheKey, nothing)
+    if cache isa MTKBase.MutableCacheKey
+        cached_sys = get(cache, UnhackSystemCacheKey, nothing)
+        if cached_sys isa System
+            return cached_sys
+        end
+    end
     # Observed are copied by the masking operation
     obseqs = observed(sys)
     eqs = copy(equations(sys))
@@ -147,11 +156,16 @@ function MTKBase.unhack_system(sys::System)
 
     dvs = [unknowns(sys); additional_vars]
 
-    @set! sys.observed = obseqs
-    @set! sys.eqs = eqs
-    @set! sys.unknowns = dvs
-    @set! sys.schedule = sched
-    return sys
+    newsys = @set sys.observed = obseqs
+    @set! newsys.eqs = eqs
+    @set! newsys.unknowns = dvs
+    @set! newsys.schedule = sched
+
+    if cache isa MTKBase.MutableCacheT
+        cache[UnhackSystemCacheKey] = newsys
+    end
+
+    return newsys
 end
 
 function populate_inline_scc_map!(
