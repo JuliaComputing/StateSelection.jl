@@ -210,6 +210,7 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
                             it = input_timedomain(v)::Vector{InputTimeDomainElT}
                             for (i, td) in enumerate(it)
                                 v′ = args[i]
+                                SU.isconst(v′) && continue
                                 addvar!(setmetadata(v′, MTKBase.VariableTimeDomain, td), VARIABLE)
                             end
                     end
