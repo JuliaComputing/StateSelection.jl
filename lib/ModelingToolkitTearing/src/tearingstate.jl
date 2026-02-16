@@ -86,6 +86,15 @@ function Base.getindex(ev::EquationsView, i::Integer)
     end
     return eqs[i]
 end
+function Base.setindex!(ev::EquationsView, v::Equation, i::Integer)
+    eqs = equations(ev.ts.sys)
+    if i > length(eqs)
+        ev.ts.extra_eqs[i - length(eqs)] = v
+    else
+        eqs[i] = v
+    end
+    return ev
+end
 function Base.push!(ev::EquationsView, eq)
     push!(ev.ts.extra_eqs, eq)
 end
