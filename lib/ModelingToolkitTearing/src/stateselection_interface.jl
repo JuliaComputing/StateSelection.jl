@@ -13,6 +13,7 @@ function StateSelection.eq_derivative!(ts::TearingState, ieq::Int; kwargs...)
     eq_diff = StateSelection.eq_derivative_graph!(s, ieq)
 
     sys = ts.sys
+    eqs = equations(ts)
     eq = equations(ts)[ieq]
     eq = Symbolics.COMMON_ZERO ~ substitute(
         Symbolics.derivative(
@@ -30,20 +31,34 @@ function StateSelection.eq_derivative!(ts::TearingState, ieq::Int; kwargs...)
         """)
     end
 
-    push!(equations(ts), eq)
+    push!(eqs, eq)
     # Analyze the new equation and update the graph/solvable_graph
     # First, copy the previous incidence and add the derivative terms.
     # That's a superset of all possible occurrences. find_solvables! will
     # remove those that doesn't actually occur.
-    eq_diff = length(equations(ts))
+    @assert length(equations(ts)) == eq_diff
     for var in 𝑠neighbors(s.graph, ieq)
         add_edge!(s.graph, eq_diff, var)
         add_edge!(s.graph, eq_diff, s.var_to_diff[var])
     end
-    s.solvable_graph === nothing ||
-        StateSelection.find_eq_solvables!(
-            ts, eq_diff; may_be_zero = true, allow_symbolic = false, kwargs...)
 
+    # `symbolically_rm_singular = false` because a lot of the removed
+    # variables aren't actually symbolically present in the system. This
+    # will thus cause a lot of unnecessary calls to `Symbolics.linear_expansion`.
+    # We already ran `search_variables!`, so we can identify the ones that
+    # really need to be removed here.
+    to_rm = Int[]
+    s.solvable_graph === nothing || StateSelection.find_eq_solvables!(
+        ts, eq_diff, to_rm; may_be_zero = true, allow_symbolic = false,
+        symbolically_rm_singular = false, kwargs...
+    )
+
+    for i in to_rm
+        ts.fullvars[i] in vs || continue
+        a, b, islin = Symbolics.linear_expansion(eqs[eq_diff].rhs, ts.fullvars[i])
+        @assert islin && SU._iszero(a)
+        eqs[eq_diff] = Symbolics.COMMON_ZERO ~ b
+    end
     return eq_diff
 end
 
@@ -201,9 +216,13 @@ function _check_allow_symbolic_parameter(
 end
 
 function StateSelection.find_eq_solvables!(state::TearingState, ieq, to_rm = Int[], coeffs = nothing;
-        may_be_zero = false,
+        # this used to be `false`, but I can't find a place where this is called
+        # that doesn't want to remove false incidences, and it fixes several bugs.
+        # So now this defaults to `true`.
+        may_be_zero = true,
         allow_symbolic = false, allow_parameter = true,
         conservative = false,
+        symbolically_rm_singular = true,
         kwargs...)
     (; fullvars) = state
     (; graph, solvable_graph) = state.structure
@@ -224,8 +243,7 @@ function StateSelection.find_eq_solvables!(state::TearingState, ieq, to_rm = Int
     for j in 𝑠neighbors(graph, ieq)
         var = fullvars[j]
         MTKBase.isirreducible(var) && (all_int_vars = false; continue)
-        a, b, islinear = Symbolics.linear_expansion(term, var)
-
+        a, b, islinear = Symbolics.LinearExpander(var; strict = true)(term)
         islinear || (all_int_vars = false; continue)
         if !SU.isconst(a)
             all_int_vars = false
@@ -261,6 +279,11 @@ function StateSelection.find_eq_solvables!(state::TearingState, ieq, to_rm = Int
     end
     for j in to_rm
         rem_edge!(graph, ieq, j)
+        symbolically_rm_singular || continue
+        eq = equations(state)[ieq]
+        a, b, islin = Symbolics.LinearExpander(fullvars[j]; strict = true)(eq.rhs)
+        SU._iszero(a) && islin || continue
+        equations(state)[ieq] = eq.lhs ~ b
     end
     all_int_vars, term
 end
