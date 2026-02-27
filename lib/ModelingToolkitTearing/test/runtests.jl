@@ -42,3 +42,17 @@ end
     @test !Graphs.has_edge(ts.structure.graph, BipartiteEdge(2, x_idx))
     @test !SU.query(isequal(x), equations(ts)[2].rhs)
 end
+
+@testset "Clock inference doesn't only rely on `fullvars` for metadata clock information" begin
+    @variables y(t) l(t)
+    k = ShiftIndex(Clock(0.1))
+    eqs = [
+        y(k) ~ -Sample()(l),
+        D(l) ~ 20*(Hold()(y) - l)
+    ]
+
+    @named cl = System(eqs, t)
+    # It should throw this error, not one saying it can't find a clock for an
+    # inferreddiscrete partition
+    @test_throws ModelingToolkit.HybridSystemNotSupportedException mtkcompile(cl)
+end

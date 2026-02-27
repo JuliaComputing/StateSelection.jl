@@ -86,7 +86,7 @@ function (iec::InferEquationClosure)(ieq::Int, eq::Equation, is_initialization_e
     empty!(varsbuf)
     empty!(hyperedge)
     # get variables in equation
-    SU.search_variables!(varsbuf, eq; is_atomic = MTKBase.OperatorIsAtomic{SU.Operator}())
+    SU.search_variables!(varsbuf, eq)
     # add the equation to the hyperedge
     eq_node = if is_initialization_equation
         ClockVertex.InitEquation(ieq)
@@ -99,6 +99,11 @@ function (iec::InferEquationClosure)(ieq::Int, eq::Equation, is_initialization_e
         # if this is just a single variable, add it to the hyperedge
         if idx isa Int
             push!(hyperedge, ClockVertex.Variable(idx))
+            d = get_time_domain(var)
+            if is_concrete_time_domain(d)
+                push!(hyperedge, ClockVertex.Clock(d))
+            end
+
             # we don't immediately `continue` here because this variable might be a
             # `Sample` or similar and we want the clock information from it if it is.
         end
