@@ -1,5 +1,6 @@
 using Test
 using ModelingToolkitTearing
+import ModelingToolkitTearing as MTKTearing
 using ModelingToolkit
 using Symbolics
 using BipartiteGraphs
@@ -55,4 +56,31 @@ end
     # It should throw this error, not one saying it can't find a clock for an
     # inferreddiscrete partition
     @test_throws ModelingToolkit.HybridSystemNotSupportedException mtkcompile(cl)
+end
+
+@testset "`ShiftIndex()` identity is used to propagate clocks" begin
+    function Inner1(; name, k)
+        @variables wde(t)
+        return System([wde(k) ~ 0], t; name)
+    end
+    function Outer(; name)
+        @variables x(t) y(t) z(t)
+        k1 = ShiftIndex() # intentionally has no clock
+        k2 = ShiftIndex() # different UUID to make sure it is not a hard constraint
+        k3 = ShiftIndex(Clock(1 // 10))
+        @named inner = Inner1(; k = k1)
+        eqs = [
+            x(k1) ~ x(k1 - 1) + 1,
+            y(k2) ~ y(k2 - 1) + 2,
+            # Not `x(k3) + y(k3)` to ensure that `x` and `y` in `TearingState` never have
+            # concrete clock metadata.
+            z(k3) ~ x + y,
+        ]
+        return System(eqs, t; systems = [inner], name)
+    end
+    @named sys = Outer()
+    ts = TearingState(sys)
+    ci = MTKTearing.ClockInference(ts)
+    MTKTearing.infer_clocks!(ci)
+    @test all(isequal(Clock(1 // 10)), ci.var_domain)
 end

@@ -20,6 +20,7 @@ StateSelection = "64909d44-ed92-46a8-bbd9-f047dfbdc84b"
 SymbolicIndexingInterface = "2efcf032-c050-4f8e-a9bb-153293bab1f5"
 SymbolicUtils = "d1185830-fcd6-423d-90d6-eec64667417b"
 Symbolics = "0c5d862f-8b57-4792-8d23-62f2024744c7"
+UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
 
 [compat]
 BipartiteGraphs = "0.1.3"
@@ -39,6 +40,7 @@ StateSelection = "1.3"
 SymbolicIndexingInterface = "0.3"
 SymbolicUtils = "4.3"
 Symbolics = "7.15.1"
+UUIDs = "1"
 julia = "1.10"
 
 [extras]
