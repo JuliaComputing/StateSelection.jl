@@ -3,7 +3,10 @@
     Equation(Int)
     InitEquation(Int)
     Clock(SciMLBase.AbstractClock)
+    InferredClock(UUID)
 end
+
+Moshi.Derive.@derive ClockVertex[Show]
 
 struct ClockInference{S <: StateSelection.TransformationState}
     """Tearing state."""
@@ -47,7 +50,19 @@ function ClockInference(ts::StateSelection.TransformationState)
         varvert = ClockVertex.Variable(i)
         add_vertex!(inference_graph, varvert)
         d = get_time_domain(fullvars[i])
-        is_concrete_time_domain(d) || continue
+        if !is_concrete_time_domain(d)
+            if d isa InferredTimeDomain
+                @match d begin
+                    InferredClock.Inferred(id) => begin
+                        dvert = ClockVertex.InferredClock(id)
+                        add_vertex!(inference_graph, dvert)
+                        add_edge!(inference_graph, (varvert, dvert))
+                    end
+                    _ => nothing
+                end
+            end
+            continue
+        end
         dvert = ClockVertex.Clock(d)
         add_vertex!(inference_graph, dvert)
         add_edge!(inference_graph, (varvert, dvert))
@@ -102,6 +117,11 @@ function (iec::InferEquationClosure)(ieq::Int, eq::Equation, is_initialization_e
             d = get_time_domain(var)
             if is_concrete_time_domain(d)
                 push!(hyperedge, ClockVertex.Clock(d))
+            elseif d isa InferredTimeDomain
+                @match d begin
+                    InferredClock.Inferred(id) => push!(hyperedge, ClockVertex.InferredClock(id))
+                    _ => nothing
+                end
             end
 
             # we don't immediately `continue` here because this variable might be a
@@ -262,6 +282,7 @@ function infer_clocks!(ci::ClockInference)
                 ClockVertex.Equation(i) => (eq_domain[i] = clock)
                 ClockVertex.InitEquation(i) => (init_eq_domain[i] = clock)
                 ClockVertex.Clock(_) => nothing
+                ClockVertex.InferredClock(_) => nothing
             end
         end
     end

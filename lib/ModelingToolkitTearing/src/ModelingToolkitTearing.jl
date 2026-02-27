@@ -27,6 +27,7 @@ using SymbolicUtils: BSImpl, unwrap
 using SciMLBase: LinearProblem
 using SparseArrays: nonzeros
 import LinearAlgebra
+import UUIDs: UUID, uuid4
 
 const TimeDomain = SciMLBase.AbstractClock
 

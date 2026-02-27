@@ -1,10 +1,16 @@
 @data InferredClock begin
-    Inferred
+    Inferred(UUID)
     InferredDiscrete(Int)
 end
 
+Moshi.Derive.@derive InferredClock[Show]
+
 const InferredTimeDomain = InferredClock.Type
 using .InferredClock: Inferred, InferredDiscrete
+
+function InferredClock.Inferred()
+    return Inferred(uuid4())
+end
 
 function InferredClock.InferredDiscrete()
     return InferredDiscrete(0)
