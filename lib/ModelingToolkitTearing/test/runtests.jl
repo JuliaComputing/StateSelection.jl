@@ -84,3 +84,15 @@ end
     MTKTearing.infer_clocks!(ci)
     @test all(isequal(Clock(1 // 10)), ci.var_domain)
 end
+
+@testset "Clock inference handles unscalarized variables" begin
+    @variables x(t)[1:3] y(t)
+    k = ShiftIndex(Clock(1 // 10))
+    # Intentionally avoid `k` in second equation
+    eqs = [x(k) ~ x(k - 1) + x(k - 2), y ~ sum(x)]
+    @named sys = System(eqs, t)
+    ts = TearingState(sys)
+    ci = MTKTearing.ClockInference(ts)
+    MTKTearing.infer_clocks!(ci)
+    @test all(isequal(Clock(1 // 10)), ci.var_domain)
+end
