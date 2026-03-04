@@ -96,3 +96,17 @@ end
     MTKTearing.infer_clocks!(ci)
     @test all(isequal(Clock(1 // 10)), ci.var_domain)
 end
+
+@testset "non-unit integer coefficients are considered solvable" begin
+    # https://github.com/SciML/ModelingToolkit.jl/issues/4322
+    @variables x(t) y(t)
+    eqs = [
+        0 ~ x - y
+        0 ~ 2y - x
+    ]
+
+    @named sys = System(eqs, t)
+    sys = mtkcompile(sys)
+    @test isempty(unknowns(sys))
+    @test length(observed(sys)) == 2
+end
