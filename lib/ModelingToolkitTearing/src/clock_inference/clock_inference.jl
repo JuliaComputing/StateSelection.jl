@@ -4,6 +4,7 @@
     InitEquation(Int)
     Clock(SciMLBase.AbstractClock)
     InferredClock(UUID)
+    IntegerSequence
 end
 
 Moshi.Derive.@derive ClockVertex[Show]
@@ -60,6 +61,10 @@ function ClockInference(ts::StateSelection.TransformationState)
                     end
                     _ => nothing
                 end
+            elseif d isa MTKBase.IntegerSequence
+                dvert = ClockVertex.IntegerSequence()
+                add_vertex!(inference_graph, dvert)
+                add_edge!(inference_graph, (varvert, dvert))
             end
             continue
         end
@@ -129,6 +134,25 @@ function (iec::InferEquationClosure)(ieq::Int, eq::Equation, is_initialization_e
                 InferredClock.Inferred(id) => push!(hyperedge, ClockVertex.InferredClock(id))
                 _ => nothing
             end
+        elseif d isa MTKBase.IntegerSequence
+            push!(hyperedge, ClockVertex.IntegerSequence())
+        end
+
+        @match var begin
+            BSImpl.Term(; f, args) && if f isa Shift end => begin
+                d = get_time_domain(args[1])
+                if is_concrete_time_domain(d)::Bool
+                    push!(hyperedge, ClockVertex.Clock(d))
+                elseif d isa InferredTimeDomain
+                    @match d begin
+                        InferredClock.Inferred(id) => push!(hyperedge, ClockVertex.InferredClock(id))
+                        _ => nothing
+                    end
+                elseif d isa MTKBase.IntegerSequence
+                    push!(hyperedge, ClockVertex.IntegerSequence())
+                end
+            end
+            _ => nothing
         end
 
         # now we only care about synchronous operators
@@ -260,7 +284,12 @@ function infer_clocks!(ci::ClockInference)
     clock_partitions = Graphs.connected_components(inference_graph)
     for partition in clock_partitions
         clockidxs = findall(Base.Fix2(Moshi.Data.isa_variant, ClockVertex.Clock), partition)
+        has_integer_sequence = any(
+            Base.Fix2(Moshi.Data.isa_variant, ClockVertex.IntegerSequence), partition
+        )
+
         if isempty(clockidxs)
+            has_integer_sequence && continue
             if any(in(must_be_discrete), partition)
                 throw(ExpectedDiscreteClockPartitionError(ts, partition, true))
             end
