@@ -4,6 +4,7 @@
     InitEquation(Int)
     Clock(SciMLBase.AbstractClock)
     InferredClock(UUID)
+    IntegerSequence
 end
 
 Moshi.Derive.@derive ClockVertex[Show]
@@ -60,6 +61,10 @@ function ClockInference(ts::StateSelection.TransformationState)
                     end
                     _ => nothing
                 end
+            elseif d isa MTKBase.IntegerSequence
+                dvert = ClockVertex.IntegerSequence()
+                add_vertex!(inference_graph, dvert)
+                add_edge!(inference_graph, (varvert, dvert))
             end
             continue
         end
@@ -74,7 +79,7 @@ end
 struct NotInferredTimeDomain end
 
 struct InferEquationClosure
-    varsbuf::Set{SymbolicT}
+    varsbuf::OrderedSet{SymbolicT}
     # variables in each argument to an operator
     arg_varsbuf::Set{SymbolicT}
     # hyperedge for each equation
@@ -90,7 +95,7 @@ struct InferEquationClosure
 end
 
 function InferEquationClosure(var_to_idx, inference_graph)
-    InferEquationClosure(Set{SymbolicT}(), Set{SymbolicT}(), Set{ClockVertex.Type}(),
+    InferEquationClosure(OrderedSet{SymbolicT}(), Set{SymbolicT}(), Set{ClockVertex.Type}(),
                          Set{ClockVertex.Type}(), Dict{Int, Set{ClockVertex.Type}}(),
                          Set{ClockVertex.Type}(), var_to_idx, inference_graph)
 end
@@ -114,22 +119,51 @@ function (iec::InferEquationClosure)(ieq::Int, eq::Equation, is_initialization_e
         # if this is just a single variable, add it to the hyperedge
         if idx isa Int
             push!(hyperedge, ClockVertex.Variable(idx))
-            d = get_time_domain(var)
-            if is_concrete_time_domain(d)
-                push!(hyperedge, ClockVertex.Clock(d))
-            elseif d isa InferredTimeDomain
-                @match d begin
-                    InferredClock.Inferred(id) => push!(hyperedge, ClockVertex.InferredClock(id))
-                    _ => nothing
-                end
-            end
-
             # we don't immediately `continue` here because this variable might be a
             # `Sample` or similar and we want the clock information from it if it is.
         end
+        d = get_time_domain(var)
+        if d === nothing
+            arrv, isarr = MTKBase.split_indexed_var(var)
+            d = get_time_domain(arrv)
+        end
+        if is_concrete_time_domain(d)
+            push!(hyperedge, ClockVertex.Clock(d))
+        elseif d isa InferredTimeDomain
+            @match d begin
+                InferredClock.Inferred(id) => push!(hyperedge, ClockVertex.InferredClock(id))
+                _ => nothing
+            end
+        elseif d isa MTKBase.IntegerSequence
+            push!(hyperedge, ClockVertex.IntegerSequence())
+        end
+
+        @match var begin
+            BSImpl.Term(; f, args) && if f isa Shift end => begin
+                d = get_time_domain(args[1])
+                if is_concrete_time_domain(d)
+                    push!(hyperedge, ClockVertex.Clock(d))
+                elseif d isa InferredTimeDomain
+                    @match d begin
+                        InferredClock.Inferred(id) => push!(hyperedge, ClockVertex.InferredClock(id))
+                        _ => nothing
+                    end
+                elseif d isa MTKBase.IntegerSequence
+                    push!(hyperedge, ClockVertex.IntegerSequence())
+                end
+            end
+            _ => nothing
+        end
+
         # now we only care about synchronous operators
         op, args = @match var begin
             BSImpl.Term(; f, args) && if is_timevarying_operator(f)::Bool end => (f, args)
+            if SU.is_array_shape(SU.shape(var)) end => begin
+                for i in SU.stable_eachindex(var)
+                    push!(varsbuf, var[i])
+                end
+                continue
+            end
             _ => continue
         end
 
@@ -215,7 +249,6 @@ function infer_clocks!(ci::ClockInference)
     (; ts, eq_domain, init_eq_domain, var_domain, inferred, inference_graph) = ci
     sys = get_sys(ts)
     fullvars = StateSelection.get_fullvars(ts)
-    isempty(inferred) && return ci
 
     var_to_idx = Dict{SymbolicT, Int}()
     sizehint!(var_to_idx, length(fullvars))
@@ -248,11 +281,15 @@ function infer_clocks!(ci::ClockInference)
     end
 
     (; must_be_discrete) = infer_equation
-
     clock_partitions = Graphs.connected_components(inference_graph)
     for partition in clock_partitions
         clockidxs = findall(Base.Fix2(Moshi.Data.isa_variant, ClockVertex.Clock), partition)
+        has_integer_sequence = any(
+            Base.Fix2(Moshi.Data.isa_variant, ClockVertex.IntegerSequence), partition
+        )
+
         if isempty(clockidxs)
+            has_integer_sequence && continue
             if any(in(must_be_discrete), partition)
                 throw(ExpectedDiscreteClockPartitionError(ts, partition, true))
             end
