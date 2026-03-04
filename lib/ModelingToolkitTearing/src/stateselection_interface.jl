@@ -4,6 +4,7 @@ function StateSelection.var_derivative!(ts::TearingState, v::Int)
     sys = ts.sys
     D = Differential(MTKBase.get_iv(sys))
     push!(ts.fullvars, D(ts.fullvars[v]))
+    push!(ts.structure.state_priorities, ts.structure.state_priorities[v])
     return var_diff
 end
 

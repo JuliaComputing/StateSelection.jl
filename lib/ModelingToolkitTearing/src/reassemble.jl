@@ -320,6 +320,7 @@ which has index dv in `fullvars`. Return the new index of x_t.
 """
 function add_dd_variable!(s::SystemStructure, fullvars, x_t, dv)
     push!(fullvars, MTKBase.simplify_shifts(x_t))
+    push!(s.state_priorities, s.state_priorities[dv])
     v_t = length(fullvars)
     v_t_idx = add_vertex!(s.var_to_diff)
     add_vertex!(s.graph, DST)
@@ -1201,6 +1202,7 @@ function add_backshifted_var!(state::TearingState, ivar::Int, iv)
     var = fullvars[ivar]
     newvar = MTKBase.simplify_shifts(Shift(iv, -1)(var))
     push!(fullvars, newvar)
+    push!(structure.state_priorities, structure.state_priorities[ivar])
     inewvar = add_vertex!(var_to_diff)
     add_edge!(var_to_diff, inewvar, ivar)
     add_vertex!(graph, DST)

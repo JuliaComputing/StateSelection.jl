@@ -18,6 +18,9 @@ Any additional fields are left up to the implementor.
 abstract type SystemStructure; end
 is_only_discrete(::SystemStructure) = false
 
+has_state_priorities(::T) where {T <: SystemStructure} = hasfield(T, :state_priorities)
+get_state_priorities(ss::SystemStructure) = ss.state_priorities
+
 """
     $TYPEDEF
 

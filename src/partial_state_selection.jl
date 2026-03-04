@@ -212,7 +212,7 @@ function dummy_derivative_graph!(
         diff_to_var = diff_to_var
 
         var -> begin
-            min_p = max_p = 0.0
+            min_p = max_p = 0
             while var_to_diff[var] !== nothing
                 var = var_to_diff[var]
             end

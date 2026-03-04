@@ -19,6 +19,8 @@ Base.@kwdef mutable struct SystemStructure <: StateSelection.SystemStructure
     solvable_graph::Union{BipartiteGraph{Int, Nothing}, Nothing}
     """Variable types (brownian, variable, parameter) in the system."""
     var_types::Vector{VariableType}
+    """State priorities corresponding to each variable in `fullvars`"""
+    state_priorities::Vector{Int}
     """Whether the system is discrete."""
     only_discrete::Bool
 end
@@ -27,7 +29,7 @@ function Base.copy(structure::SystemStructure)
     var_types = structure.var_types === nothing ? nothing : copy(structure.var_types)
     SystemStructure(copy(structure.var_to_diff), copy(structure.eq_to_diff),
         copy(structure.graph), copy(structure.solvable_graph),
-        var_types, structure.only_discrete)
+        var_types, copy(structure.state_priorities), structure.only_discrete)
 end
 
 StateSelection.is_only_discrete(s::SystemStructure) = s.only_discrete
@@ -297,6 +299,8 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
     # build incidence graph
     graph = build_incidence_graph(length(fullvars), symbolic_incidence, var2idx)
 
+    state_priorities = build_state_priorities(sys, fullvars, var_to_diff)
+
     # Identify unknowns that do not appear in any equations and are thus not present in
     # `fullvars`. The bindings and initial conditions for these variables should be removed.
     for v in fullvars
@@ -319,9 +323,39 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
     eq_to_diff = StateSelection.DiffGraph(nsrcs(graph))
 
     structure = SystemStructure(complete(var_to_diff), complete(eq_to_diff),
-                                complete(graph), nothing, var_types, false)
+                                complete(graph), nothing, var_types, state_priorities, false)
     return TearingState(sys, fullvars, structure, Equation[], param_derivative_map,
                         no_deriv_params, original_eqs, Equation[], typeof(sys)[], sources)
+end
+
+function build_state_priorities(sys::System, fullvars::Vector{SymbolicT}, var_to_diff::StateSelection.DiffGraph)
+    # Cache the state priorities
+    sps = state_priorities(sys)
+    var_priorities = Int[]
+    sizehint!(var_priorities, length(fullvars))
+    for v in fullvars
+        arr, _ = MTKBase.split_indexed_var(v)
+        push!(var_priorities, get(sps, arr, 0))
+    end
+
+    # Propagate priorities up the `var_to_diff` graph. Each variable's final priority is
+    # the maximum of priorities of any of its derivatives
+    diff_to_var = invview(var_to_diff)
+    for i in eachindex(fullvars)
+        # Find a variable that is the lowest order derivative
+        diff_to_var[i] === nothing || continue
+        p = var_priorities[i]
+        var::Int = i
+        # Iterate through the higher order derivatives and update their priorities
+        while true
+            p = var_priorities[var] = max(p, var_priorities[var])
+            tmp = var_to_diff[var]
+            tmp === nothing && break
+            var = tmp
+        end
+    end
+
+    return var_priorities
 end
 
 function sort_fullvars(fullvars::Vector{SymbolicT}, dervaridxs::Vector{Int}, var_types::Vector{VariableType}, @nospecialize(iv::Union{SymbolicT, Nothing}))
