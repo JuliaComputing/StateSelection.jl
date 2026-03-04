@@ -63,6 +63,8 @@ jobs:
           using Pkg
           @info "dev StateSelection.jl"
           Pkg.develop(; path = ".")
+          @info "dev ModelingToolkitBase.jl"
+          Pkg.develop(; path = "downstream/lib/ModelingToolkitBase")
           @info "dev ModelingToolkitTearing.jl"
           Pkg.develop(; path = "lib/ModelingToolkitTearing")
           Pkg.test("ModelingToolkit")
