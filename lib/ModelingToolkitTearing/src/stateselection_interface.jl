@@ -261,21 +261,23 @@ function StateSelection.find_eq_solvables!(state::TearingState, ieq, to_rm = Int
         # When the expression is linear with numeric `a`, then we can safely
         # only consider `b` for the following iterations.
         term = b
-        a_is_one = SU._isone(a)
-        if a_is_one || manual_dispatch_isabsone(unwrap_const(a))
-            coeffs === nothing || push!(coeffs, a_is_one ? 1 : -1)
-        else
+        a = manual_dispatch_is_small_int(unwrap_const(a))::Int
+        if a == typemin(Int)
             all_int_vars = false
             conservative && continue
-        end
-        if !SU._iszero(a)
-            add_edge!(solvable_graph, ieq, j)
         else
-            if may_be_zero
-                push!(to_rm, j)
-            else
-                @warn "Internal error: Variable $var was marked as being in $eq, but was actually zero"
-            end
+            coeffs === nothing || push!(coeffs, a)
+        end
+
+        if !iszero(a)
+            add_edge!(solvable_graph, ieq, j)
+            continue
+        end
+
+        if may_be_zero
+            push!(to_rm, j)
+        else
+            @warn "Internal error: Variable $var was marked as being in $eq, but was actually zero"
         end
     end
     for j in to_rm
@@ -289,22 +291,36 @@ function StateSelection.find_eq_solvables!(state::TearingState, ieq, to_rm = Int
     all_int_vars, term
 end
 
-function manual_dispatch_isabsone(@nospecialize(x))
+"""
+    $TYPEDSIGNATURES
+
+If `x` is a small integer (fits in `Int8`) return `Int(x)`. Otherwise, return
+`typemin(Int)`.
+"""
+function manual_dispatch_is_small_int(@nospecialize(x::Number))::Int
     if x isa Int
-        return isone(abs(x))
+        return typemin(Int8) <= x <= typemax(Int8) ? x : typemin(Int)
     elseif x isa BigInt
-        return isone(abs(x))
+        return typemin(Int8) <= x <= typemax(Int8) ? Int(x) : typemin(Int)
+    elseif x isa Int32
+        return typemin(Int8) <= x <= typemax(Int8) ? Int(x) : typemin(Int)
     elseif x isa Float64
-        return isone(abs(x))
+        return isinteger(x) && typemin(Int8) <= x <= typemax(Int8) ? Int(x) : typemin(Int)
     elseif x isa Float32
-        return isone(abs(x))
+        return isinteger(x) && typemin(Int8) <= x <= typemax(Int8) ? Int(x) : typemin(Int)
     elseif x isa BigFloat
-        return isone(abs(x))
+        return isinteger(x) && typemin(Int8) <= x <= typemax(Int8) ? Int(x) : typemin(Int)
     elseif x isa Rational{Int}
-        return isone(abs(x))
+        return isinteger(x) && typemin(Int8) <= x <= typemax(Int8) ? Int(x) : typemin(Int)
+    elseif x isa Rational{Int32}
+        return isinteger(x) && typemin(Int8) <= x <= typemax(Int8) ? Int(x) : typemin(Int)
     elseif x isa Rational{BigInt}
-        return isone(abs(x))
+        return isinteger(x) && typemin(Int8) <= x <= typemax(Int8) ? Int(x) : typemin(Int)
     else
-        return isone(abs(x))::Bool
+        return if isinteger(x)::Bool && (typemin(Int8) <= x <= typemax(Int8))::Bool
+            Int(x)::Int
+        else
+            typemin(Int)
+        end
     end
 end
