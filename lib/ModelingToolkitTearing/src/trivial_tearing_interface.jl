@@ -31,6 +31,7 @@ function StateSelection.trivial_tearing_postprocess!(ts::TearingState, torn_eqs:
         deleteat!(ts.structure.var_types, torn_vars)
     end
     deleteat!(ts.fullvars, torn_vars)
+    deleteat!(ts.structure.state_priorities, torn_vars)
     deleteat!(ts.original_eqs, torn_eqs)
     sys = ts.sys
     eqs = copy(MTKBase.get_eqs(sys))
