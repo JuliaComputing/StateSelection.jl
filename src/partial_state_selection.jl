@@ -416,9 +416,12 @@ function tearing_with_dummy_derivatives(structure, dummy_derivatives)
     return var_eq_matching, full_var_eq_matching, var_sccs, can_eliminate
 end
 
-struct DummyDerivativeTearing <: TearingAlgorithm end
+struct DummyDerivativeTearing{T <: TearingAlgorithm} <: TearingAlgorithm end
+DummyDerivativeTearing() = DummyDerivativeTearing{CarpanzanoTearing}()
 
-function (::DummyDerivativeTearing)(structure::SystemStructure, dummy_derivatives::Union{BitSet, Tuple{}} = ())
+function (::DummyDerivativeTearing{T})(
+        structure::SystemStructure, dummy_derivatives::Union{BitSet, Tuple{}} = ()
+    ) where {T}
     (; var_to_diff) = structure
     # We can eliminate variables that are not selected (differential
     # variables). Selected unknowns are differentiated variables that are not
@@ -430,11 +433,11 @@ function (::DummyDerivativeTearing)(structure::SystemStructure, dummy_derivative
             can_eliminate[v] = true
         end
     end
-    modia_tearing = ModiaTearing(;
+    inner_tearing_alg = T(;
         isder = Base.Fix1(isdiffed, (structure, dummy_derivatives)),
         varfilter = Base.Fix1(getindex, can_eliminate)
     )
-    tearing_result, _ = modia_tearing(structure)
+    tearing_result, _ = inner_tearing_alg(structure)
 
     for v in 𝑑vertices(structure.graph)
         is_present(structure, v) || continue
