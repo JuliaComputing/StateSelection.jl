@@ -102,6 +102,31 @@ count_nonzeros(a::AbstractArray) = count(!iszero, a)
 # Here we have a guarantee that they won't, so we can make this identification
 count_nonzeros(a::CLILVector) = nnz(a)
 
+"""
+    $(TYPEDSIGNATURES)
+
+Mark variable `v` as non-linear and propagate that marking transitively to all
+variables that co-appear with `v` in a linear equation.  `stack` is a
+pre-allocated work buffer (cleared and reused by this function).  `var_to_lineq`
+maps each variable to the set of linear equations it appears in.
+"""
+function mark_not_linear!(linear_variables::BitVector, stack::Vector{Int},
+        var_to_lineq::Dict{Int, BitSet}, graph, v::Int)
+    linear_variables[v] = false
+    push!(stack, v)
+    while !isempty(stack)
+        v = pop!(stack)
+        eqs = get(var_to_lineq, v, nothing)
+        eqs === nothing && continue
+        for eq in eqs, v′ in 𝑠neighbors(graph, eq)
+            if linear_variables[v′]
+                linear_variables[v′] = false
+                push!(stack, v′)
+            end
+        end
+    end
+end
+
 # Linear variables are highest order differentiated variables that only appear
 # in linear equations with only linear variables. Also, if a variable's any
 # derivatives is nonlinear, then all of them are not linear variables.
@@ -109,25 +134,6 @@ function find_linear_variables(graph, linear_equations, var_to_diff, irreducible
     stack = Int[]
     linear_variables = falses(length(var_to_diff))
     var_to_lineq = Dict{Int, BitSet}()
-    mark_not_linear! = let linear_variables = linear_variables, stack = stack,
-        var_to_lineq = var_to_lineq
-
-        v -> begin
-            linear_variables[v] = false
-            push!(stack, v)
-            while !isempty(stack)
-                v = pop!(stack)
-                eqs = get(var_to_lineq, v, nothing)
-                eqs === nothing && continue
-                for eq in eqs, v′ in 𝑠neighbors(graph, eq)
-                    if linear_variables[v′]
-                        linear_variables[v′] = false
-                        push!(stack, v′)
-                    end
-                end
-            end
-        end
-    end
     for eq in linear_equations, v in 𝑠neighbors(graph, eq)
         linear_variables[v] = true
         vlineqs = get!(() -> BitSet(), var_to_lineq, v)
@@ -136,7 +142,7 @@ function find_linear_variables(graph, linear_equations, var_to_diff, irreducible
     for v in irreducibles
         lv = extreme_var(var_to_diff, v)
         while true
-            mark_not_linear!(lv)
+            mark_not_linear!(linear_variables, stack, var_to_lineq, graph, lv)
             lv = var_to_diff[lv]
             lv === nothing && break
         end
@@ -159,7 +165,7 @@ function find_linear_variables(graph, linear_equations, var_to_diff, irreducible
         end
         lv = oldlv
         remove && while true
-            mark_not_linear!(lv)
+            mark_not_linear!(linear_variables, stack, var_to_lineq, graph, lv)
             lv = var_to_diff[lv]
             lv === nothing && break
         end
@@ -167,6 +173,15 @@ function find_linear_variables(graph, linear_equations, var_to_diff, irreducible
 
     return linear_variables
 end
+
+"""
+    $(TYPEDSIGNATURES)
+
+Return `true` if variable `v` is purely algebraic, i.e. it has no derivative
+and is not itself a derivative of another variable.
+"""
+is_algebraic(var_to_diff, v::Int)::Bool =
+    var_to_diff[v] === nothing === invview(var_to_diff)[v]
 
 function aag_bareiss!(structure, mm_orig::SparseMatrixCLIL{T, Ti}) where {T, Ti}
     (; graph, var_to_diff) = structure
@@ -180,14 +195,12 @@ function aag_bareiss!(structure, mm_orig::SparseMatrixCLIL{T, Ti}) where {T, Ti}
     # Bareiss'ed coefficients as Gaussian elimination is nullspace preserving
     # and we are only working on linear homogeneous subsystem.
 
-    is_algebraic = let var_to_diff = var_to_diff
-        v -> var_to_diff[v] === nothing === invview(var_to_diff)[v]
-    end
-    is_linear_variables = is_algebraic.(1:length(var_to_diff))
+    is_linear_variables = Base.Fix1(is_algebraic, var_to_diff).(1:length(var_to_diff))
     is_highest_diff = computed_highest_diff_variables(structure)
     for i in 𝑠vertices(graph)
         # only consider linear algebraic equations
-        (i in linear_equations_set && all(is_algebraic, 𝑠neighbors(graph, i))) &&
+        (i in linear_equations_set &&
+            all(Base.Fix1(is_algebraic, var_to_diff), 𝑠neighbors(graph, i))) &&
             continue
         for j in 𝑠neighbors(graph, i)
             is_linear_variables[j] = false
@@ -213,49 +226,85 @@ function aag_bareiss!(structure, mm_orig::SparseMatrixCLIL{T, Ti}) where {T, Ti}
     end
 end
 
-function do_bareiss!(M, Mold, is_linear_variables, is_highest_diff)
-    rank1r = Ref{Union{Nothing, Int}}(nothing)
-    rank2r = Ref{Union{Nothing, Int}}(nothing)
-    find_pivot = let rank1r = rank1r
-        (M, k) -> begin
-            if rank1r[] === nothing
-                r = find_masked_pivot(is_linear_variables, M, k)
-                r !== nothing && return r
-                rank1r[] = k - 1
-            end
-            if rank2r[] === nothing
-                r = find_masked_pivot(is_highest_diff, M, k)
-                r !== nothing && return r
-                rank2r[] = k - 1
-            end
-            # TODO: It would be better to sort the variables by
-            # derivative order here to enable more elimination
-            # opportunities.
-            return find_masked_pivot(nothing, M, k)
-        end
-    end
-    pivots = Int[]
-    find_and_record_pivot = let pivots = pivots
-        (M, k) -> begin
-            r = find_pivot(M, k)
-            r === nothing && return nothing
-            push!(pivots, r[1][2])
+"Column-swap no-op passed to `bareiss!` when using the virtual column-swap strategy."
+noop_colswap(M, i, j) = nothing
+
+"""
+    $(TYPEDEF)
+
+A callable that swaps rows `i` and `j` in the working matrix `M` and, if
+`Mold` is not `nothing`, simultaneously applies the same swap to `Mold`.
+Used to keep the original matrix in sync with the Bareiss working copy during
+row operations.
+"""
+struct SyncedSwapRows{M}
+    Mold::M
+end
+(s::SyncedSwapRows{Nothing})(M, i::Int, j::Int) = Base.swaprows!(M, i, j)
+(s::SyncedSwapRows)(M, i::Int, j::Int) = (Base.swaprows!(s.Mold, i, j); Base.swaprows!(M, i, j))
+
+"""
+    $(TYPEDEF)
+
+Mutable state threaded through the Bareiss factorization callbacks.
+
+- `rank1`/`rank2`: record where each tier of pivot selection was exhausted,
+  used to compute the three rank values returned by `do_bareiss!`.
+- `pivots`: accumulates the column index of every pivot chosen during elimination.
+- `is_linear_variables`/`is_highest_diff`: masks used for the tiered pivot search.
+"""
+mutable struct BareissContext{V1 <: AbstractVector{Bool}, V2 <: AbstractVector{Bool}}
+    rank1::Union{Nothing, Int}
+    rank2::Union{Nothing, Int}
+    pivots::Vector{Int}
+    is_linear_variables::V1
+    is_highest_diff::V2
+end
+
+"""
+    $(TYPEDSIGNATURES)
+
+Tiered pivot selection for Bareiss factorization.  Tries three strategies in
+order, recording the rank at which each tier is exhausted:
+1. A pivot among `is_linear_variables` columns (rank1 boundary).
+2. A pivot among `is_highest_diff` columns (rank2 boundary).
+3. Any pivot in the remaining matrix.
+The column index of every selected pivot is appended to `ctx.pivots`.
+"""
+function (ctx::BareissContext)(M, k::Int)
+    if ctx.rank1 === nothing
+        r = find_masked_pivot(ctx.is_linear_variables, M, k)
+        if r !== nothing
+            push!(ctx.pivots, r[1][2])
             return r
         end
+        ctx.rank1 = k - 1
     end
-    myswaprows! = let Mold = Mold
-        (M, i, j) -> begin
-            Mold !== nothing && Base.swaprows!(Mold, i, j)
-            Base.swaprows!(M, i, j)
+    if ctx.rank2 === nothing
+        r = find_masked_pivot(ctx.is_highest_diff, M, k)
+        if r !== nothing
+            push!(ctx.pivots, r[1][2])
+            return r
         end
+        ctx.rank2 = k - 1
     end
-    bareiss_ops = ((M, i, j) -> nothing, myswaprows!,
-        bareiss_update_virtual_colswap_mtk!, bareiss_zero!)
+    # TODO: It would be better to sort the variables by
+    # derivative order here to enable more elimination
+    # opportunities.
+    r = find_masked_pivot(nothing, M, k)
+    r !== nothing && push!(ctx.pivots, r[1][2])
+    return r
+end
 
-    rank3, = bareiss!(M, bareiss_ops; find_pivot = find_and_record_pivot)
-    rank2 = something(rank2r[], rank3)
-    rank1 = something(rank1r[], rank2)
-    (rank1, rank2, rank3, pivots)
+function do_bareiss!(M, Mold, is_linear_variables::AbstractVector{Bool},
+        is_highest_diff::AbstractVector{Bool})
+    ctx = BareissContext(nothing, nothing, Int[], is_linear_variables, is_highest_diff)
+    bareiss_ops = (noop_colswap, SyncedSwapRows(Mold),
+        bareiss_update_virtual_colswap_mtk!, bareiss_zero!)
+    rank3, = bareiss!(M, bareiss_ops; find_pivot = ctx)
+    rank2 = something(ctx.rank2, rank3)
+    rank1 = something(ctx.rank1, rank2)
+    (rank1, rank2, rank3, ctx.pivots)
 end
 
 function force_var_to_zero!(structure::SystemStructure, ils::SparseMatrixCLIL, v::Int)
