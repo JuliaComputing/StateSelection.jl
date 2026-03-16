@@ -119,6 +119,18 @@ function (iec::InferEquationClosure)(ieq::Int, eq::Equation, is_initialization_e
         # if this is just a single variable, add it to the hyperedge
         if idx isa Int
             push!(hyperedge, ClockVertex.Variable(idx))
+            d = get_time_domain(var)
+            if is_concrete_time_domain(d)
+                push!(hyperedge, ClockVertex.Clock(d))
+            elseif d isa InferredTimeDomain
+                @match d begin
+                    InferredClock.Inferred(id) => push!(hyperedge, ClockVertex.InferredClock(id))
+                    _ => nothing
+                end
+            elseif d isa MTKBase.IntegerSequence
+                push!(hyperedge, ClockVertex.IntegerSequence())
+            end
+ 
             # we don't immediately `continue` here because this variable might be a
             # `Sample` or similar and we want the clock information from it if it is.
         end
@@ -168,7 +180,7 @@ function (iec::InferEquationClosure)(ieq::Int, eq::Equation, is_initialization_e
         end
 
         # arguments and corresponding time domains
-        tdomains = input_timedomain(op)::Vector{InputTimeDomainElT}
+        tdomains = input_timedomain(op, args)::Vector{InputTimeDomainElT}
         nargs = length(args)
         ndoms = length(tdomains)
         if nargs != ndoms
@@ -200,6 +212,10 @@ function (iec::InferEquationClosure)(ieq::Int, eq::Equation, is_initialization_e
                     # add the edge to the graph
                     add_edge!(inference_graph, arg_hyperedge)
                 end
+                x::MTKBase.IntegerSequence => begin
+                    push!(arg_hyperedge, ClockVertex.IntegerSequence())
+                    add_edge!(inference_graph, arg_hyperedge)
+                end
                 # We only know that this time domain is inferred. Treat it as a unique domain, all we know is that the
                 # involved variables have the same clock.
                 InferredClock.Inferred() => add_edge!(inference_graph, arg_hyperedge)
@@ -215,7 +231,7 @@ function (iec::InferEquationClosure)(ieq::Int, eq::Equation, is_initialization_e
             end
         end
 
-        outdomain = output_timedomain(op)
+        outdomain = output_timedomain(op, args)
         if outdomain isa SciMLBase.AbstractClock
             push!(hyperedge, ClockVertex.Clock(outdomain))
         elseif outdomain isa InferredTimeDomain
@@ -320,6 +336,7 @@ function infer_clocks!(ci::ClockInference)
                 ClockVertex.InitEquation(i) => (init_eq_domain[i] = clock)
                 ClockVertex.Clock(_) => nothing
                 ClockVertex.InferredClock(_) => nothing
+                ClockVertex.IntegerSequence() => nothing
             end
         end
     end
@@ -385,10 +402,10 @@ end
 function is_time_domain_conversion(v::SymbolicT)
     @match v begin
         BSImpl.Term(; f, args) && if f isa SU.Operator end => begin
-            itd = input_timedomain(f)::Vector{InputTimeDomainElT}
+            itd = input_timedomain(f, args)::Vector{InputTimeDomainElT}
             allequal(itd) || return true
             isempty(itd) && return true
-            otd = output_timedomain(f)::InputTimeDomainElT
+            otd = output_timedomain(f, args)::InputTimeDomainElT
             (itd[1] == otd)::Bool || return true
             return false
         end

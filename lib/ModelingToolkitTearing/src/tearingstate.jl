@@ -218,7 +218,7 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
                     BSImpl.Term(; f, args) && if f isa SU.Operator &&
                             !(f isa Differential)
                         end => begin
-                            it = input_timedomain(v)::Vector{InputTimeDomainElT}
+                            it = input_timedomain(f, args)::Vector{InputTimeDomainElT}
                             for (i, td) in enumerate(it)
                                 v′ = args[i]
                                 SU.isconst(v′) && continue

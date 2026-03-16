@@ -29,7 +29,7 @@ is_concrete_time_domain(_) = false
 
 function get_time_domain(x::SymbolicT)
     @match x begin
-        BSImpl.Term(; f) && if f isa SU.Operator && is_timevarying_operator(f)::Bool end => output_timedomain(x)
+        BSImpl.Term(; f, args) && if f isa SU.Operator && is_timevarying_operator(f)::Bool end => output_timedomain(f, args)
         _ => getmetadata(x, MTKBase.VariableTimeDomain, nothing)
     end
 end
