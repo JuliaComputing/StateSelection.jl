@@ -1314,7 +1314,11 @@ function tearing_hacks(sys, obs, unknowns, neweqs; array = true)
         # try to `create_array(OffsetArray{...}, ...)` which errors.
         # `term(Origin(firstind), scal)` doesn't retain the `symtype` and `size`
         # of `scal`.
-        rhs = change_origin(firstind, scal)
+        if all(isone, firstind)
+            rhs = scal
+        else
+            rhs = change_origin(firstind, scal)
+        end
         push!(obs_arr_eqs, arrvar ~ rhs)
     end
     append!(obs, obs_arr_eqs)

@@ -71,7 +71,18 @@ function MTKBase.unhack_system(sys::System)
     obs_mask = trues(length(obseqs))
     for (i, eq) in enumerate(obseqs)
         obs_mask[i] = @match eq.rhs begin
-            BSImpl.Term(; f) => f !== change_origin
+            BSImpl.Term(; f, args) => if f === change_origin
+                false
+            elseif f === SU.array_literal
+                result = true
+                for (si, ai) in zip(SU.stable_eachindex(eq.lhs), Iterators.drop(eachindex(args), 1))
+                    result &= isequal(eq.lhs[si], args[ai])
+                    result || break
+                end
+                !result
+            else
+                true
+            end
             _ => true
         end
     end
