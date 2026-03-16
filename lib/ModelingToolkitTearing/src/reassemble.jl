@@ -575,8 +575,25 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
         lu !== nothing && return BSImpl.Const{VartypeT}((lu \ b)::Vector{SymbolicT})
     end
     # Turn into symbolic arrays
-    A = SU.Const{VartypeT}(A)
-    b = SU.Const{VartypeT}(b)
+    sys = state.sys
+    reference_idx = findfirst(!SU.isconst, A)
+    if reference_idx === nothing
+        reference_idx = findfirst(!SU.isconst, b)
+        if reference_idx === nothing
+            reference = first(A)
+        else
+            reference = A[reference_idx]
+        end
+    else
+        reference = A[reference_idx]
+    end
+    sys, A_cache = MTKBase.add_diffcache(sys, length(A))
+    A_allocator = A_cache(reference)
+    A = SU.Code.with_allocator(A_allocator, SU.Const{VartypeT}(A))
+    sys, b_cache = MTKBase.add_diffcache(sys, length(b))
+    b_allocator = b_cache(reference)
+    b = SU.Code.with_allocator(b_allocator, SU.Const{VartypeT}(b))
+    state.sys = sys
     return INLINE_LINEAR_SCC_OP(A, b)
 end
 
