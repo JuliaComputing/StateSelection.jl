@@ -119,6 +119,18 @@ function (iec::InferEquationClosure)(ieq::Int, eq::Equation, is_initialization_e
         # if this is just a single variable, add it to the hyperedge
         if idx isa Int
             push!(hyperedge, ClockVertex.Variable(idx))
+            d = get_time_domain(var)
+            if is_concrete_time_domain(d)
+                push!(hyperedge, ClockVertex.Clock(d))
+            elseif d isa InferredTimeDomain
+                @match d begin
+                    InferredClock.Inferred(id) => push!(hyperedge, ClockVertex.InferredClock(id))
+                    _ => nothing
+                end
+            elseif d isa MTKBase.IntegerSequence
+                push!(hyperedge, ClockVertex.IntegerSequence())
+            end
+ 
             # we don't immediately `continue` here because this variable might be a
             # `Sample` or similar and we want the clock information from it if it is.
         end
@@ -198,6 +210,10 @@ function (iec::InferEquationClosure)(ieq::Int, eq::Equation, is_initialization_e
                     # add the clock to the edge
                     push!(arg_hyperedge, ClockVertex.Clock(x))
                     # add the edge to the graph
+                    add_edge!(inference_graph, arg_hyperedge)
+                end
+                x::MTKBase.IntegerSequence => begin
+                    push!(arg_hyperedge, ClockVertex.IntegerSequence())
                     add_edge!(inference_graph, arg_hyperedge)
                 end
                 # We only know that this time domain is inferred. Treat it as a unique domain, all we know is that the
@@ -320,6 +336,7 @@ function infer_clocks!(ci::ClockInference)
                 ClockVertex.InitEquation(i) => (init_eq_domain[i] = clock)
                 ClockVertex.Clock(_) => nothing
                 ClockVertex.InferredClock(_) => nothing
+                ClockVertex.IntegerSequence() => nothing
             end
         end
     end
