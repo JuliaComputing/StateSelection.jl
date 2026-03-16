@@ -168,7 +168,7 @@ function (iec::InferEquationClosure)(ieq::Int, eq::Equation, is_initialization_e
         end
 
         # arguments and corresponding time domains
-        tdomains = input_timedomain(op)::Vector{InputTimeDomainElT}
+        tdomains = input_timedomain(op, args)::Vector{InputTimeDomainElT}
         nargs = length(args)
         ndoms = length(tdomains)
         if nargs != ndoms
@@ -215,7 +215,7 @@ function (iec::InferEquationClosure)(ieq::Int, eq::Equation, is_initialization_e
             end
         end
 
-        outdomain = output_timedomain(op)
+        outdomain = output_timedomain(op, args)
         if outdomain isa SciMLBase.AbstractClock
             push!(hyperedge, ClockVertex.Clock(outdomain))
         elseif outdomain isa InferredTimeDomain
@@ -385,10 +385,10 @@ end
 function is_time_domain_conversion(v::SymbolicT)
     @match v begin
         BSImpl.Term(; f, args) && if f isa SU.Operator end => begin
-            itd = input_timedomain(f)::Vector{InputTimeDomainElT}
+            itd = input_timedomain(f, args)::Vector{InputTimeDomainElT}
             allequal(itd) || return true
             isempty(itd) && return true
-            otd = output_timedomain(f)::InputTimeDomainElT
+            otd = output_timedomain(f, args)::InputTimeDomainElT
             (itd[1] == otd)::Bool || return true
             return false
         end
