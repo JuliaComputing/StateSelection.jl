@@ -55,7 +55,7 @@ the `constraint`.
 @inline function find_first_linear_variable(M::SparseMatrixCLIL,
         range,
         mask,
-        constraint)
+        constraint, ::Nothing = nothing)
     eadj = M.row_cols
     @inbounds for i in range
         vertices = eadj[i]
@@ -70,10 +70,33 @@ the `constraint`.
     return nothing
 end
 
+@inline function find_first_linear_variable(
+        M::SparseMatrixCLIL,
+        range,
+        mask,
+        constraint, var_priorities::AbstractVector{Int}
+    )
+    eadj = M.row_cols
+    @inbounds for i in range
+        vertices = eadj[i]
+        constraint(length(vertices)) || continue
+        candidate_v = 0
+        candidate_val = 0
+        for (j, v) in enumerate(vertices)
+            mask === nothing || mask[v] || continue
+            iszero(candidate_v) || var_priorities[v] < var_priorities[candidate_v] || continue
+            candidate_v = v
+            candidate_val = M.row_vals[i][j]
+        end
+        iszero(candidate_v) || return CartesianIndex(i, candidate_v), candidate_val
+    end
+    return nothing
+end
+
 @inline function find_first_linear_variable(M::AbstractMatrix,
         range,
         mask,
-        constraint)
+        constraint, ::Nothing = nothing)
     @inbounds for i in range
         row = @view M[i, :]
         if constraint(count(!iszero, row))
@@ -87,12 +110,36 @@ end
     return nothing
 end
 
-function find_masked_pivot(variables, M, k)
-    r = find_first_linear_variable(M, k:size(M, 1), variables, isequal(1))
+@inline function find_first_linear_variable(
+        M::AbstractMatrix,
+        range,
+        mask,
+        constraint, var_priorities::AbstractVector{Int}
+    )
+    @inbounds for i in range
+        row = @view M[i, :]
+        constraint(count(!iszero, row)) || continue
+        candidate_v = 0
+        candidate_val = 0
+        for (v, val) in enumerate(row)
+            mask === nothing || mask[v] || continue
+            if iszero(candidate_v) || var_priorities[v] < var_priorities[candidate_v]
+                candidate_v = v
+                candidate_val = val
+            end
+        end
+        iszero(candidate_v) && return nothing
+        return CartesianIndex(i, candidate_v), candidate_val
+    end
+    return nothing
+end
+
+function find_masked_pivot(variables, M, k, var_priorities)
+    r = find_first_linear_variable(M, k:size(M, 1), variables, isequal(1), var_priorities)
     r !== nothing && return r
-    r = find_first_linear_variable(M, k:size(M, 1), variables, isequal(2))
+    r = find_first_linear_variable(M, k:size(M, 1), variables, isequal(2), var_priorities)
     r !== nothing && return r
-    r = find_first_linear_variable(M, k:size(M, 1), variables, _ -> true)
+    r = find_first_linear_variable(M, k:size(M, 1), variables, _ -> true, var_priorities)
     return r
 end
 
@@ -207,14 +254,15 @@ function aag_bareiss!(structure, mm_orig::SparseMatrixCLIL{T, Ti}) where {T, Ti}
         end
     end
     solvable_variables = findall(is_linear_variables)
+    var_priorities = has_state_priorities(structure) ? get_state_priorities(structure) : nothing
 
     local bar
     try
-        bar = do_bareiss!(mm, mm_orig, is_linear_variables, is_highest_diff)
+        bar = do_bareiss!(mm, mm_orig, is_linear_variables, is_highest_diff, var_priorities)
     catch e
         e isa OverflowError || rethrow(e)
         mm = convert(SparseMatrixCLIL{BigInt, Ti}, mm_orig)
-        bar = do_bareiss!(mm, mm_orig, is_linear_variables, is_highest_diff)
+        bar = do_bareiss!(mm, mm_orig, is_linear_variables, is_highest_diff, var_priorities)
     end
 
     # This phrasing infers the return type as `Union{Tuple{...}}` instead of
@@ -244,6 +292,18 @@ end
 (s::SyncedSwapRows)(M, i::Int, j::Int) = (Base.swaprows!(s.Mold, i, j); Base.swaprows!(M, i, j))
 
 """
+    $TYPEDEF
+
+Lazy `&&` of two boolean masks. Only implements whatever is required for `find_masked_pivot`.
+"""
+struct LazyMaskAnd{V1 <: AbstractVector{Bool}, V2 <: AbstractVector{Bool}}
+    mask1::V1
+    mask2::V2
+end
+
+Base.getindex(lma::LazyMaskAnd, i::Integer) = lma.mask1[i] && lma.mask2[i]
+
+"""
     $(TYPEDEF)
 
 Mutable state threaded through the Bareiss factorization callbacks.
@@ -253,12 +313,21 @@ Mutable state threaded through the Bareiss factorization callbacks.
 - `pivots`: accumulates the column index of every pivot chosen during elimination.
 - `is_linear_variables`/`is_highest_diff`: masks used for the tiered pivot search.
 """
-mutable struct BareissContext{V1 <: AbstractVector{Bool}, V2 <: AbstractVector{Bool}}
+mutable struct BareissContext{V1 <: AbstractVector{Bool}, V2 <: AbstractVector{Bool}, P <: Union{Nothing, AbstractVector{Int}}}
     rank1::Union{Nothing, Int}
     rank2::Union{Nothing, Int}
     pivots::Vector{Int}
     is_linear_variables::V1
     is_highest_diff::V2
+    valid_pivot_mask::BitVector
+    var_priorities::P
+end
+
+function BareissContext(is_linear_variables, is_highest_diff, var_priorities = nothing)
+    return BareissContext(
+        nothing, nothing, Int[], is_linear_variables, is_highest_diff,
+        trues(length(is_linear_variables)), var_priorities
+    )
 end
 
 """
@@ -273,7 +342,8 @@ The column index of every selected pivot is appended to `ctx.pivots`.
 """
 function (ctx::BareissContext)(M, k::Int)
     if ctx.rank1 === nothing
-        r = find_masked_pivot(ctx.is_linear_variables, M, k)
+        mask = LazyMaskAnd(ctx.is_linear_variables, ctx.valid_pivot_mask)
+        r = find_masked_pivot(ctx.is_linear_variables, M, k, ctx.var_priorities)
         if r !== nothing
             push!(ctx.pivots, r[1][2])
             return r
@@ -281,7 +351,8 @@ function (ctx::BareissContext)(M, k::Int)
         ctx.rank1 = k - 1
     end
     if ctx.rank2 === nothing
-        r = find_masked_pivot(ctx.is_highest_diff, M, k)
+        mask = LazyMaskAnd(ctx.is_highest_diff, ctx.valid_pivot_mask)
+        r = find_masked_pivot(ctx.is_highest_diff, M, k, ctx.var_priorities)
         if r !== nothing
             push!(ctx.pivots, r[1][2])
             return r
@@ -291,16 +362,28 @@ function (ctx::BareissContext)(M, k::Int)
     # TODO: It would be better to sort the variables by
     # derivative order here to enable more elimination
     # opportunities.
-    r = find_masked_pivot(nothing, M, k)
+    r = find_masked_pivot(nothing, M, k, ctx.var_priorities)
     r !== nothing && push!(ctx.pivots, r[1][2])
     return r
 end
 
+struct BareissContextUpdate{C <: BareissContext, F}
+    context::C
+    inner_update::F
+end
+
+function (bcu::BareissContextUpdate)(zero!, M, k, swapto, pivot, last_pivot; kw...)
+    ctx = bcu.context
+    col = swapto[2]
+    ctx.valid_pivot_mask[col] = false
+    return bcu.inner_update(zero!, M, k, swapto, pivot, last_pivot; kw...)
+end
+
 function do_bareiss!(M, Mold, is_linear_variables::AbstractVector{Bool},
-        is_highest_diff::AbstractVector{Bool})
-    ctx = BareissContext(nothing, nothing, Int[], is_linear_variables, is_highest_diff)
-    bareiss_ops = (noop_colswap, SyncedSwapRows(Mold),
-        bareiss_update_virtual_colswap_mtk!, bareiss_zero!)
+        is_highest_diff::AbstractVector{Bool}, var_priorities = nothing)
+    ctx = BareissContext(is_linear_variables, is_highest_diff, var_priorities)
+    update! = BareissContextUpdate(ctx, bareiss_update_virtual_colswap_mtk!)
+    bareiss_ops = (noop_colswap, SyncedSwapRows(Mold), update!, bareiss_zero!)
     rank3, = bareiss!(M, bareiss_ops; find_pivot = ctx)
     rank2 = something(ctx.rank2, rank3)
     rank1 = something(ctx.rank1, rank2)
