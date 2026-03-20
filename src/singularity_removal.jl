@@ -15,15 +15,21 @@ end
 level === nothing ? v : (v => level)
 end
 
-function structural_singularity_removal!(state::TransformationState;
-        variable_underconstrained! = force_var_to_zero!, kwargs...)
+function structural_singularity_removal!(
+        state::TransformationState, ::Val{ReturnPivots} = Val{false}();
+        variable_underconstrained! = force_var_to_zero!, kwargs...
+    ) where {ReturnPivots}
     mm = linear_subsys_adjmat!(state; kwargs...)
     if size(mm, 1) == 0
-        return mm # No linear subsystems
+        if ReturnPivots
+            return mm, PivotInfo(0, 0, Int[])
+        else
+            return mm # No linear subsystems
+        end
     end
 
     (; graph, var_to_diff, solvable_graph) = state.structure
-    mm = structural_singularity_removal!(state, mm; variable_underconstrained!)
+    mm, pivotinfo = structural_singularity_removal!(state, mm, Val{true}(); variable_underconstrained!)
     s = state.structure
     for (ei, e) in enumerate(mm.nzrows)
         set_neighbors!(s.graph, e, mm.row_cols[ei])
@@ -34,7 +40,11 @@ function structural_singularity_removal!(state::TransformationState;
         end
     end
 
-    return mm
+    if ReturnPivots
+        return mm, pivotinfo
+    else
+        return mm
+    end
 end
 
 # For debug purposes
@@ -404,8 +414,37 @@ function force_var_to_zero!(structure::SystemStructure, ils::SparseMatrixCLIL, v
     return ils
 end
 
-function structural_singularity_removal!(state::TransformationState, ils::SparseMatrixCLIL;
-        variable_underconstrained! = force_var_to_zero!)
+"""
+    $TYPEDSIGNATURES
+
+Information about the pivots chosen by Bareiss during `structural_singularity_removal!`.
+This can be returned from `structural_singularity_removal!` by passing `Val(true)` as the last
+positional argument.
+
+$TYPEDFIELDS
+"""
+struct PivotInfo
+    """
+    The length of the prefix of `pivots` that is variables which _only_ occur in linear
+    equations of the sort considered by this pass. These variables must be solved for
+    using the integer coefficient equations considered by this pass.
+    """
+    n_linear_vars::Int
+    """
+    Number of elements in `pivots` after `n_linear_vars` corresponding to highest order
+    derivative variables.
+    """
+    n_highest_diff_vars::Int
+    """
+    The list of pivots chosen by the Bareiss algorithm.
+    """
+    pivots::Vector{Int}
+end
+
+function structural_singularity_removal!(
+        state::TransformationState, ils::SparseMatrixCLIL, ::Val{ReturnPivots} = Val{false}();
+        variable_underconstrained! = force_var_to_zero!
+    ) where {ReturnPivots}
     (; structure) = state
     (; graph, solvable_graph, var_to_diff, eq_to_diff) = state.structure
     # Step 1: Perform Bareiss factorization on the adjacency matrix of the linear
@@ -420,5 +459,9 @@ function structural_singularity_removal!(state::TransformationState, ils::Sparse
         ils = variable_underconstrained!(structure, ils, v)
     end
 
-    return ils
+    if ReturnPivots
+        return ils, PivotInfo(rank1, rank2, pivots)
+    else
+        return ils
+    end
 end
