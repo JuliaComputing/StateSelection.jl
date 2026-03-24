@@ -24,7 +24,7 @@ function StateSelection.possibly_explicit_equations(state::TearingState)
 end
 
 function StateSelection.trivial_tearing_postprocess!(ts::TearingState, torn_eqs::OrderedSet{Int}, torn_vars::OrderedSet{Int})
-    ts.additional_observed = ts.original_eqs[collect(torn_eqs)]
+    append!(ts.additional_observed, @view ts.original_eqs[collect(torn_eqs)])
     sort!(torn_vars)
     sort!(torn_eqs)
     if ts.structure.var_types !== nothing
