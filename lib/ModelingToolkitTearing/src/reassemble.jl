@@ -939,9 +939,13 @@ function update_simplified_system!(
         MTKBase.isdiffeq(eq) || continue
         obs_sub[eq.lhs] = eq.rhs
     end
+    (; additional_observed) = state
+    if StateSelection.is_only_discrete(structure)
+        additional_observed = map(Base.Fix2(backshift_expr, iv), additional_observed)
+    end
     # TODO: compute the dependency correctly so that we don't have to do this
     obs = [substitute(observed(sys), obs_sub); solved_eqs;
-           substitute(state.additional_observed, obs_sub)]
+           substitute(additional_observed, obs_sub)]
 
     filterer = let diff_to_var = diff_to_var, ispresent = ispresent, fullvars = fullvars,
         solved_vars = solved_vars
