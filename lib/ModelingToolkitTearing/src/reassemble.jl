@@ -576,16 +576,35 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
     end
     # Turn into symbolic arrays
     sys = state.sys
-    reference_idx = findfirst(!SU.isconst, A)
-    if reference_idx === nothing
-        reference_idx = findfirst(!SU.isconst, b)
+    # Prefer using a differential variable
+    state_idx = findfirst(
+        Base.Fix2(isa, SelectedState) ∘ Base.Fix1(getindex, var_eq_matching),
+        eachindex(var_eq_matching)
+    )
+    if state_idx === nothing
+        # Find something in `A`
+        reference_idx = @something(
+            findfirst(iscall ∘ unwrap, A),
+            findfirst(!SU.isconst ∘ unwrap, A),
+            Some(nothing)
+        )
         if reference_idx === nothing
-            reference = first(A)
+            # Find something in `b`
+            reference_idx = @something(
+                findfirst(iscall, b),
+                findfirst(!SU.isconst, b),
+                Some(nothing)
+            )
+            if reference_idx === nothing
+                reference = first(A)
+            else
+                reference = b[reference_idx]
+            end
         else
             reference = A[reference_idx]
         end
     else
-        reference = A[reference_idx]
+        reference = fullvars[state_idx]
     end
     sys, A_cache = MTKBase.add_diffcache(sys, length(A))
     A_allocator = A_cache(reference)
@@ -1055,6 +1074,7 @@ function (alg::DefaultReassembleAlgorithm)(state::TearingState,
     (; simplify, array_hack, inline_linear_sccs, analytical_linear_scc_limit) = alg
     (; var_eq_matching, full_var_eq_matching, var_sccs) = tearing_result
 
+
     extra_eqs_vars = get_extra_eqs_vars(
         state, var_eq_matching, full_var_eq_matching, fully_determined)
     neweqs = collect(equations(state))
@@ -1069,6 +1089,12 @@ function (alg::DefaultReassembleAlgorithm)(state::TearingState,
         end
     else
         iv = D = nothing
+    end
+    # `iv === nothing` implies a nonlinear system. `SCCNonlinearProblem` should be
+    # used instead of this pass. `D isa Shift` implies a discrete system, which currently
+    # doesn't support inline linear SCCs.
+    if iv === nothing || D isa Shift
+        inline_linear_sccs = false
     end
 
     extra_unknowns = state.fullvars[extra_eqs_vars[2]]
