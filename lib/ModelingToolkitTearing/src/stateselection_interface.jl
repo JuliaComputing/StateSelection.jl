@@ -326,3 +326,38 @@ function manual_dispatch_is_small_int(@nospecialize(x::Number))::Int
         end
     end
 end
+
+function StateSelection.rm_eqs_vars!(
+        structure::SystemStructure, eqs_to_rm::Vector{Int}, vars_to_rm::Vector{Int};
+        eqs_sorted_and_uniqued::Bool = false, vars_sorted_and_uniqued::Bool = false
+    )
+    old_to_new_eq, old_to_new_var = StateSelection.default_rm_eqs_vars!(
+        structure, eqs_to_rm, vars_to_rm; eqs_sorted_and_uniqued, vars_sorted_and_uniqued
+    )
+    deleteat!(structure.state_priorities, vars_to_rm)
+    deleteat!(structure.var_types, vars_to_rm)
+    return old_to_new_eq, old_to_new_var
+end
+
+function StateSelection.rm_eqs_vars!(
+        state::TearingState, eqs_to_rm::Vector{Int}, vars_to_rm::Vector{Int};
+        eqs_sorted_and_uniqued::Bool = false, vars_sorted_and_uniqued::Bool = false
+    )
+    (; structure, sys) = state
+    old_to_new_eq, old_to_new_var = StateSelection.rm_eqs_vars!(
+        structure, eqs_to_rm, vars_to_rm; eqs_sorted_and_uniqued, vars_sorted_and_uniqued
+    )
+    deleteat!(state.fullvars, vars_to_rm)
+    eqs = copy(MTKBase.get_eqs(state.sys))
+    deleteat!(eqs, eqs_to_rm)
+    deleteat!(state.original_eqs, eqs_to_rm)
+    if !isempty(state.eqs_source)
+        deleteat!(state.eqs_source, eqs_to_rm)
+    end
+
+    @set! sys.eqs = eqs
+    state.sys = sys
+
+    return old_to_new_eq, old_to_new_var
+end
+

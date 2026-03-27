@@ -23,21 +23,8 @@ function StateSelection.possibly_explicit_equations(state::TearingState)
     return Iterators.map(mapfn, Iterators.filter(filterfn, eachindex(state.original_eqs)))
 end
 
-function StateSelection.trivial_tearing_postprocess!(ts::TearingState, torn_eqs::OrderedSet{Int}, torn_vars::OrderedSet{Int})
-    append!(ts.additional_observed, @view ts.original_eqs[collect(torn_eqs)])
-    sort!(torn_vars)
-    sort!(torn_eqs)
-    if ts.structure.var_types !== nothing
-        deleteat!(ts.structure.var_types, torn_vars)
-    end
-    deleteat!(ts.fullvars, torn_vars)
-    deleteat!(ts.structure.state_priorities, torn_vars)
-    deleteat!(ts.original_eqs, torn_eqs)
-    sys = ts.sys
-    eqs = copy(MTKBase.get_eqs(sys))
-    deleteat!(eqs, torn_eqs)
-    @set! sys.eqs = eqs
-    ts.sys = sys
+function StateSelection.trivial_tearing_postprocess!(ts::TearingState, torn_eqs::Vector{Int}, torn_vars::Vector{Int})
+    append!(ts.additional_observed, @view ts.original_eqs[torn_eqs])
     return ts
 end
 
