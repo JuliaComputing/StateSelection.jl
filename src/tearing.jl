@@ -35,7 +35,7 @@ any simplification. The equations torn by this process are ones that are already
 an explicit form in the system and where the LHS is not present in any other equation of
 the system except for other such preempitvely torn equations.
 """
-function trivial_tearing!(ts::TransformationState)
+function trivial_tearing!(ts::TransformationState, mm::Union{SparseMatrixCLIL, Nothing} = nothing)
     # equations that can be trivially torn an observed equations
     trivial_idxs = OrderedSet{Int}()
     # variables that have been matched to trivially torn equations
@@ -75,6 +75,7 @@ function trivial_tearing!(ts::TransformationState)
                 v in matched_vars && continue
                 # `> 1` and not `0` because one entry will be this equation (`eqi`)
                 isvalid &= count(!in(trivial_idxs), 𝑑neighbors(graph, v)) > 1
+                isvalid &= invview(var_to_diff)[v] === nothing
                 isvalid || break
             end
             isvalid || continue
@@ -88,23 +89,32 @@ function trivial_tearing!(ts::TransformationState)
         added_equation || break
     end
 
-    # `deleteat!` requires sorted indices, but we want to maintain relative order to pass
-    # to `trivial_tearing_postprocess!`
-    torn_vars_idxs = collect(matched_vars)
-    sort!(torn_vars_idxs)
-    torn_eqs_idxs = collect(trivial_idxs)
-    sort!(torn_eqs_idxs)
-    deleteat!(var_to_diff.primal_to_diff, torn_vars_idxs)
-    deleteat!(var_to_diff.diff_to_primal, torn_vars_idxs)
-    deleteat!(ts.structure.eq_to_diff.primal_to_diff, torn_eqs_idxs)
-    deleteat!(ts.structure.eq_to_diff.diff_to_primal, torn_eqs_idxs)
-    delete_srcs!(ts.structure.graph, torn_eqs_idxs; rm_verts = true)
-    delete_dsts!(ts.structure.graph, torn_vars_idxs; rm_verts = true)
-    if ts.structure.solvable_graph !== nothing
-        delete_srcs!(ts.structure.solvable_graph, torn_eqs_idxs; rm_verts = true)
-        delete_dsts!(ts.structure.solvable_graph, torn_vars_idxs; rm_verts = true)
+    # For backward compatibility
+    if hasmethod(rm_eqs_vars!, Tuple{typeof(ts), Vector{Int}, Vector{Int}})
+        # `deleteat!` requires sorted indices, but we want to maintain relative order to pass
+        # to `trivial_tearing_postprocess!`
+        torn_vars_idxs = collect(matched_vars)
+        torn_eqs_idxs = collect(trivial_idxs)
+        trivial_tearing_postprocess!(ts, trivial_idxs, matched_vars)
+        sort!(torn_eqs_idxs)
+        sort!(torn_vars_idxs)
+        rm_eqs_vars!(
+            ts, torn_eqs_idxs, torn_vars_idxs; eqs_sorted_and_uniqued = true,
+            vars_sorted_and_uniqued = true
+        )
+    else
+        # `deleteat!` requires sorted indices, but we want to maintain relative order to pass
+        # to `trivial_tearing_postprocess!`
+        torn_vars_idxs = collect(matched_vars)
+        sort!(torn_vars_idxs)
+        torn_eqs_idxs = collect(trivial_idxs)
+        sort!(torn_eqs_idxs)
+        rm_eqs_vars!(
+            ts.structure, torn_eqs_idxs, torn_vars_idxs; eqs_sorted_and_uniqued = true,
+            vars_sorted_and_uniqued = true
+        )
+        trivial_tearing_postprocess!(ts, trivial_idxs, matched_vars)
     end
-    trivial_tearing_postprocess!(ts, trivial_idxs, matched_vars)
     return ts
 end
 
@@ -134,8 +144,26 @@ the torn variables. The ordering of `torn_vars` corresponds to that of `torn_eqs
 Prior to calling this function, the minimal required fields of `state.structure` will have
 been updated appropriately (torn elements removed). At minimum, this function should update
 `state` such that [`get_fullvars`](@ref) returns the appropriate subset of variables.
+
+!!! warn
+    This signature is deprecated now.
 """
 function trivial_tearing_postprocess!(state::TransformationState, torn_eqs::OrderedSet{Int}, torn_vars::OrderedSet{Int})
+    error("This function must be implemented to run `trivial_tearing!`")
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Postprocessing function after running [`trivial_tearing!`](@ref). Update `state` given that
+`torn_eqs` have been preemptively torn. The order of `torn_eqs` is important, as it
+determines a topolgical ordering of the torn equations. `torn_vars` similarly identifies
+the torn variables. The ordering of `torn_vars` corresponds to that of `torn_eqs`.
+
+`torn_eqs` and `torn_vars` will be removed from `state` after this function is called.
+To dispatch to this method, `rm_eqs_vars!` must be implemented for `state`.
+"""
+function trivial_tearing_postprocess!(state::TransformationState, torn_eqs::Vector{Int}, torn_vars::Vector{Int})
     error("This function must be implemented to run `trivial_tearing!`")
 end
 

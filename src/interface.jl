@@ -172,3 +172,121 @@ Find an equation-variable maximal bipartite matching for `s`, using the incidenc
 function BipartiteGraphs.maximal_matching(s::SystemStructure; kw...)
     maximal_matching(s.graph; kw...)
 end
+
+"""
+    $TYPEDSIGNATURES
+
+Return a `Vector{Int}` mapping indices of elements in a vector of length `n_before`
+to the new indices of elements in the buffer after deleting elements at indices `dels`.
+Deleted elements are mapped to `0`.
+"""
+function get_old_to_new_idxs(n_before::Int, dels::Vector{Int})
+    old_to_new = Vector{Int}(undef, n_before)
+    idx = 0
+    cursor = 1
+    ndels = length(dels)
+    for i in eachindex(old_to_new)
+        if cursor <= ndels && i == dels[cursor]
+            cursor += 1
+            old_to_new[i] = -1
+            continue
+        end
+        idx += 1
+        old_to_new[i] = idx
+    end
+    n_new_eqs = idx
+
+    return old_to_new, n_new_eqs
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Remove equations in `eqs_to_rm` and variables in `vars_to_rm` from `structure`.
+Return `(old_to_new_eq, old_to_new_var)::NTuple{2, Vector{Int}}` where `old_to_new_eq`
+is a mapping from indices of equations in the original `structure` to their indices
+in the modified `structure`. Indices mapped to zero are deleted. `old_to_new_var` is
+similar, for variables.
+
+The implementation for a custom `SystemStructure` can utilize `default_rm_eqs_vars!`
+with the same signature to run the fallback method.
+
+# Keyword arguments
+
+- `eqs_sorted_and_uniqued`: Whether `eqs_to_rm` is consists of sorted, unique indices.
+- `vars_sorted_and_uniqued`: Whether `vars_to_rm` is consists of sorted, unique indices.
+"""
+function rm_eqs_vars!(
+        structure::SystemStructure, eqs_to_rm::Vector{Int}, vars_to_rm::Vector{Int};
+        eqs_sorted_and_uniqued::Bool = false, vars_sorted_and_uniqued::Bool = false
+    )
+    return default_rm_eqs_vars!(
+        structure, eqs_to_rm, vars_to_rm; eqs_sorted_and_uniqued, vars_sorted_and_uniqued
+    )
+end
+
+function default_rm_eqs_vars!(
+        structure::SystemStructure, eqs_to_rm::Vector{Int}, vars_to_rm::Vector{Int};
+        eqs_sorted_and_uniqued::Bool = false, vars_sorted_and_uniqued::Bool = false
+    )
+    (; graph, solvable_graph, var_to_diff, eq_to_diff) = structure
+
+    eqs_sorted_and_uniqued || unique!(sort!(eqs_to_rm))
+    vars_sorted_and_uniqued || unique!(sort!(vars_to_rm))
+
+    old_to_new_eq, n_new_eqs = get_old_to_new_idxs(nsrcs(graph), eqs_to_rm)
+    old_to_new_var, n_new_vars = get_old_to_new_idxs(ndsts(graph), vars_to_rm)
+
+    diff_to_var = invview(var_to_diff)
+    new_graph = BipartiteGraph(n_new_eqs, n_new_vars)
+    if solvable_graph !== nothing
+        new_solvable_graph = BipartiteGraph(n_new_eqs, n_new_vars)
+    end
+    new_eq_to_diff = StateSelection.DiffGraph(n_new_eqs)
+    for (i, ieq) in enumerate(old_to_new_eq)
+        ieq > 0 || continue
+        new_nbors = map(Base.Fix1(getindex, old_to_new_var), 𝑠neighbors(graph, i))
+        filter!(>(0), new_nbors)
+        set_neighbors!(new_graph, ieq, new_nbors)
+        if solvable_graph !== nothing
+            new_nbors = map(Base.Fix1(getindex, old_to_new_var), 𝑠neighbors(solvable_graph, i))
+            filter!(>(0), new_nbors)
+            set_neighbors!(new_solvable_graph, ieq, new_nbors)
+        end
+        ediff = eq_to_diff[i]
+        if ediff isa Int
+            ediff = old_to_new_eq[ediff]
+            @assert ediff > 0
+        end
+        new_eq_to_diff[ieq] = ediff
+    end
+
+    # update DiffGraph
+    # NOTE: This cannot update `state_priorities` because it is called by `trivial_tearing!`,
+    # and the old `trivial_tearing_postprocess!` method does that.
+    new_var_to_diff = StateSelection.DiffGraph(n_new_vars)
+    for (v, newv) in enumerate(old_to_new_var)
+        newv > 0 || continue
+        vdiff = var_to_diff[v]
+        if vdiff isa Int
+            vdiff = old_to_new_var[vdiff]
+        end
+        new_var_to_diff[newv] = vdiff
+    end
+    structure.graph = new_graph
+    if solvable_graph !== nothing
+        structure.solvable_graph = new_solvable_graph
+    end
+    structure.eq_to_diff = new_eq_to_diff
+    structure.var_to_diff = new_var_to_diff
+
+    return old_to_new_eq, old_to_new_var
+end
+
+"""
+This function must be implemented for any `TransformationState` with
+`state::TransformationState` replacing `structure::SystemStructure` as the first argument.
+It must call `rm_eqs_vars!(structure, ...)` and obtain the reindexing maps to use. It
+should return the same maps.
+"""
+function rm_eqs_vars! end
