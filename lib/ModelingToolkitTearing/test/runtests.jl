@@ -114,18 +114,18 @@ end
 @testset "`additional_observed` works correctly for discrete systems" begin
     @variables x(t) y(t)
     k = ShiftIndex(t)
-    @named sys = System([x(k) ~ x(k-1) + 1, y(k) ~ x(k)], t)
+    @named sys = System([x(k) ~ 1, y(k) ~ x(k)], t)
     ts = TearingState(sys)
     # Original equations should mirror those of the system
     @test issetequal(ts.original_eqs, equations(sys))
     # `mark_discrete` should shift `original_eqs` forward too
     ts = MTKTearing.mark_discrete(ts)
-    @test issetequal(ts.original_eqs, [x(k+1) ~ x(k) + 1, y(k+1) ~ x(k + 1)])
+    @test issetequal(ts.original_eqs, [x(k + 1) ~ 1, y(k+1) ~ x(k + 1)])
     # `trivial_tearing!` should then move them to `additional_observed`
     StateSelection.trivial_tearing!(ts)
-    @test issetequal(ts.additional_observed, [y(k+1) ~ x(k+1)])
+    @test issetequal(ts.additional_observed, [x(k+1) ~ 1, y(k+1) ~ x(k+1)])
     # MTK calls `trivial_tearing!`, and the reassemble process should backshift
     # `additional_observed`
     ss = mtkcompile(sys)
-    @test any(isequal(y(k) ~ x(k)), observed(ss))
+    @test issetequal(observed(ss), [y(k) ~ x(k), x(k) ~ 1])
 end
