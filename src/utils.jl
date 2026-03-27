@@ -245,3 +245,120 @@ function sorted_incidence_matrix(ts::TransformationState, val = true; only_algeq
     end
     SparseArrays.sparse(I, J, val, nsrcs(graph), ndsts(graph))
 end
+
+function add_row_coeffs!(
+        row_col_i::Vector{Int}, row_val_i::Vector{T}, old_to_new_var::Vector{Int},
+        aliases::Dict{Int, Int}, old_var::Int, coeff::T
+    ) where {T <: Integer}
+    alias = get(aliases, old_var, 0)
+    iszero(alias) && return
+    push!(row_col_i, old_to_new_var[alias])
+    push!(row_val_i, coeff)
+    return nothing
+end
+
+function add_row_coeffs!(
+        row_col_i::Vector{Int}, row_val_i::Vector{T}, old_to_new_var::Vector{Int},
+        aliases::Dict{Int, SparseArrays.SparseVector{T, Int}}, old_var::Int, coeff::T
+    ) where {T <: Integer}
+    alias = get(aliases, old_var, nothing)
+    if alias isa SparseArrays.SparseVector{T, Int}
+        I, V = SparseArrays.findnz(alias)
+        for (i, v) in zip(I, V)
+            iszero(old_to_new_var[i])
+        end
+        append!(row_col_i, Iterators.map(Base.Fix1(getindex, old_to_new_var), I))
+        append!(row_val_i, Iterators.map(Base.Fix1(*, coeff), V))
+    end
+    return nothing
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Construct the new coefficient matrix with:
+
+- Some equations removed, as indicated by `old_to_new_eq` which is obtained from
+  `get_old_to_new_idxs`.
+- Some variables removed and aliased to other variables, as indicated by `old_to_new_var`
+  and `aliases`. `aliases` can be a `Dict{Int, Int}` indicating variables exactly aliased
+  to others, or `Dict{Int, SparseVector{eltype(mm)}}` indicating variables aliased to linear
+  combinations of others. Note that this is not recursive - if one variable
+  depends on another aliased variable, it will lead to incorrect results.
+"""
+function get_new_mm(
+        aliases::Dict{Int}, old_to_new_eq::Vector{Int}, old_to_new_var::Vector{Int},
+        mm::CLIL.SparseMatrixCLIL
+    )
+
+    new_nparentrows = mm.nparentrows
+    new_row_cols = eltype(mm.row_cols)[]
+    new_row_vals = eltype(mm.row_vals)[]
+    new_nzrows = Int[]
+    indices = Int[]
+
+    for (i, eq) in enumerate(mm.nzrows)
+        old_to_new_eq[eq] > 0 || continue
+        new_row_col_i = eltype(eltype(new_row_cols))[]
+        new_row_val_i = eltype(eltype(new_row_vals))[]
+        sizehint!(new_row_col_i, length(mm.row_cols[i]))
+        sizehint!(new_row_val_i, length(mm.row_vals[i]))
+        still_valid_eq = true
+        for (var, coeff) in zip(mm.row_cols[i], mm.row_vals[i])
+            if old_to_new_var[var] > 0
+                push!(new_row_col_i, old_to_new_var[var])
+                push!(new_row_val_i, coeff)
+                continue
+            end
+            # This variable is removed, but not aliased to an integer coefficient linear
+            # combination. As a result, this equation cannot be retained in `mm`.
+            if !haskey(aliases, var)
+                still_valid_eq = false
+                break
+            end
+
+            add_row_coeffs!(new_row_col_i, new_row_val_i, old_to_new_var, aliases, var, coeff)
+        end
+
+        bad_idx = findfirst(iszero, new_row_col_i)
+        if bad_idx isa Int
+            throw(BadMMAliasError(bad_idx))
+        end
+        still_valid_eq || continue
+        empty!(indices)
+        append!(indices, LinearIndices(new_row_col_i))
+        sortperm!(indices, new_row_col_i)
+        final_row_cols = empty(new_row_col_i)
+        final_row_vals = empty(new_row_val_i)
+        push!(final_row_cols, new_row_col_i[indices[1]])
+        push!(final_row_vals, new_row_val_i[indices[1]])
+        for i in Iterators.drop(eachindex(indices), 1)
+            if new_row_col_i[indices[i]] == new_row_col_i[indices[i - 1]]
+                final_row_vals[end] += new_row_val_i[indices[i]]
+            else
+                push!(final_row_cols, new_row_col_i[indices[i]])
+                push!(final_row_vals, new_row_val_i[indices[i]])
+            end
+        end
+        
+        push!(new_row_cols, final_row_cols)
+        push!(new_row_vals, final_row_vals)
+        push!(new_nzrows, old_to_new_eq[eq])
+    end
+
+    return typeof(mm)(new_nparentrows, count(!iszero, old_to_new_var), new_nzrows, new_row_cols, new_row_vals)
+end
+
+struct BadMMAliasError <: Exception
+    eq::Int
+end
+
+function Base.showerror(io::IO, err::BadMMAliasError)
+    return print(
+        io, """
+        When processing equation $(err.eq), the list of aliases resulted in a linear
+        combination of a removed variable. No variable should be aliased to a removed
+        variable.
+        """
+    )
+end

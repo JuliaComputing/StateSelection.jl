@@ -34,6 +34,9 @@ Preemptively identify observed equations in the system and tear them. This happe
 any simplification. The equations torn by this process are ones that are already given in
 an explicit form in the system and where the LHS is not present in any other equation of
 the system except for other such preempitvely torn equations.
+
+Optionally passing in the linear coefficient matrix `mm` will update it according to the
+newly torn equations.
 """
 function trivial_tearing!(ts::TransformationState, mm::Union{SparseMatrixCLIL, Nothing} = nothing)
     if is_only_discrete(ts.structure)
@@ -95,33 +98,98 @@ function trivial_tearing!(ts::TransformationState, mm::Union{SparseMatrixCLIL, N
         # if we didn't add an equation this iteration, we won't add one next iteration
         added_equation || break
     end
+    torn_vars_idxs = collect(matched_vars)
+    torn_eqs_idxs = collect(trivial_idxs)
 
     # For backward compatibility
     if hasmethod(rm_eqs_vars!, Tuple{typeof(ts), Vector{Int}, Vector{Int}})
         # `deleteat!` requires sorted indices, but we want to maintain relative order to pass
         # to `trivial_tearing_postprocess!`
-        torn_vars_idxs = collect(matched_vars)
-        torn_eqs_idxs = collect(trivial_idxs)
-        trivial_tearing_postprocess!(ts, trivial_idxs, matched_vars)
+        trivial_tearing_postprocess!(ts, torn_eqs_idxs, torn_vars_idxs)
         sort!(torn_eqs_idxs)
         sort!(torn_vars_idxs)
-        rm_eqs_vars!(
+        old_to_new_eq, old_to_new_var = rm_eqs_vars!(
             ts, torn_eqs_idxs, torn_vars_idxs; eqs_sorted_and_uniqued = true,
             vars_sorted_and_uniqued = true
         )
     else
         # `deleteat!` requires sorted indices, but we want to maintain relative order to pass
         # to `trivial_tearing_postprocess!`
-        torn_vars_idxs = collect(matched_vars)
         sort!(torn_vars_idxs)
-        torn_eqs_idxs = collect(trivial_idxs)
         sort!(torn_eqs_idxs)
-        rm_eqs_vars!(
+        old_to_new_eq, old_to_new_var = rm_eqs_vars!(
             ts.structure, torn_eqs_idxs, torn_vars_idxs; eqs_sorted_and_uniqued = true,
             vars_sorted_and_uniqued = true
         )
         trivial_tearing_postprocess!(ts, trivial_idxs, matched_vars)
     end
+    if mm !== nothing
+        aliases = Dict{Int, SparseArrays.SparseVector{eltype(mm), Int}}()
+        linear_eqs = Dict{Int, Int}()
+        for (i, eq) in enumerate(mm.nzrows)
+            linear_eqs[eq] = i
+        end
+        torn_vars_set = BitSet(torn_vars_idxs)
+        perm = Int[]
+        for (var, eq) in zip(torn_vars_idxs, torn_eqs_idxs)
+            ieq = get(linear_eqs, eq, 0)
+            iszero(ieq) && continue
+            # `trivial_tearing!` considers equations already written by the user in a
+            # solvable form, so we know that the coefficient of `var` must be `-1` and do
+            # not need to be concerned with fractions.
+            eq_vars = mm.row_cols[ieq]
+            eq_coeffs = mm.row_vals[ieq]
+
+            I = Int[]
+            V = Int[]
+            sizehint!(I, length(eq_vars))
+            sizehint!(V, length(eq_vars))
+            can_be_aliased = true
+            for (v, cf) in zip(eq_vars, eq_coeffs)
+                if v == var
+                    @assert cf == -1
+                    continue
+                end
+                alias = get(aliases, v, nothing)
+                if alias === nothing
+                    # If this variable is not aliased to a linear combination,
+                    # and is torn, then this equation is no longer a linear equation
+                    # that can be retained in `mm`.
+                    if v in torn_vars_set
+                        can_be_aliased = false
+                        break
+                    end
+                    push!(I, v)
+                    push!(V, cf)
+                    continue
+                end
+                _I, _V = SparseArrays.findnz(alias)
+                append!(I, _I)
+                append!(V, Iterators.map(Base.Fix1(*, cf), _V))
+            end
+            can_be_aliased || continue
+
+            resize!(perm, length(I))
+            sortperm!(perm, I)
+            I = I[perm]
+            V = V[perm]
+            i = 1
+            for j in Iterators.drop(eachindex(I), 1)
+                if I[j] == I[i]
+                    V[i] += V[j]
+                else
+                    i += 1
+                    I[i] = I[j]
+                    V[i] = V[j]
+                end
+            end
+            
+            aliases[var] = SparseArrays.SparseVector(size(mm, 2), I, V)
+        end
+        mm = get_new_mm(aliases, old_to_new_eq, old_to_new_var, mm)
+        return ts, mm
+    end
+
     return ts
 end
 
