@@ -568,6 +568,8 @@ function lower_order_var(dervar::SymbolicT, t::SymbolicT)
 end
 
 function shift_discrete_system(ts::TearingState)
+    # NOTE: `original_eqs` is intentionally not shifted here. This behavior is
+    # necessary for hybrid system handling.
     (; fullvars, sys) = ts
     fullvars_set = Set{SymbolicT}(fullvars)
     discvars = OrderedSet{SymbolicT}()
@@ -592,14 +594,7 @@ function shift_discrete_system(ts::TearingState)
             eqs[i], discmap; filterer = Symbolics.FPSubFilterer{Union{Sample, Hold, Pre}}()))
     end
 
-    original_eqs = copy(ts.original_eqs)
-    for i in eachindex(original_eqs)
-        original_eqs[i] = MTKBase.simplify_shifts(substitute(
-            original_eqs[i], discmap; filterer = Symbolics.FPSubFilterer{Union{Sample, Hold, Pre}}()))
-    end
-
     @set! ts.sys.eqs = eqs
-    @set! ts.original_eqs = original_eqs
     @set! ts.fullvars = fullvars
     return ts
 end
