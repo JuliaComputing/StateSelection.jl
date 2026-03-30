@@ -36,6 +36,13 @@ an explicit form in the system and where the LHS is not present in any other equ
 the system except for other such preempitvely torn equations.
 """
 function trivial_tearing!(ts::TransformationState, mm::Union{SparseMatrixCLIL, Nothing} = nothing)
+    if is_only_discrete(ts.structure)
+        if mm === nothing
+            return ts
+        else
+            return ts, mm
+        end
+    end
     # equations that can be trivially torn an observed equations
     trivial_idxs = OrderedSet{Int}()
     # variables that have been matched to trivially torn equations
