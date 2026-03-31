@@ -363,3 +363,6 @@ function StateSelection.rm_eqs_vars!(
     return old_to_new_eq, old_to_new_var
 end
 
+function StateSelection.is_unused_var(state::TearingState, var::Integer)
+    return !state.always_present[var] && isempty(𝑑neighbors(state.structure.graph, var))
+end
