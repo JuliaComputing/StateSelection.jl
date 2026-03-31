@@ -131,7 +131,7 @@ function trivial_tearing!(ts::TransformationState, mm::Union{SparseMatrixCLIL, N
         end
         torn_vars_set = BitSet(torn_vars_idxs)
         perm = Int[]
-        for (var, eq) in zip(torn_vars_idxs, torn_eqs_idxs)
+        for (var, eq) in zip(matched_vars, trivial_idxs)
             ieq = get(linear_eqs, eq, 0)
             iszero(ieq) && continue
             # `trivial_tearing!` considers equations already written by the user in a
