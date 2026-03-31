@@ -94,12 +94,22 @@ function singular_check(state::TransformationState)
     unassigned_var = eltype(get_fullvars(state))[]
     for (vj, eq) in enumerate(extended_var_eq_matching)
         vj > nvars && break
-        if eq === unassigned && !isempty(𝑑neighbors(graph, vj))
+        if eq === unassigned && !is_unused_var(state, vj)
             push!(unassigned_var, fullvars[vj])
         end
     end
     return unassigned_var
 
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Check if the variable `var` is unsed by any equation in `state`. By default, checks
+the incidence graph.
+"""
+function is_unused_var(state::TransformationState, var::Integer)
+    return isempty(𝑑neighbors(state.structure.graph, var))
 end
 
 """
@@ -117,7 +127,7 @@ function check_consistency(state::TransformationState, orig_inputs; nothrow = fa
     n_highest_vars = 0
     for (v, h) in enumerate(highest_vars)
         h || continue
-        isempty(𝑑neighbors(graph, v)) && continue
+        is_unused_var(state, v) && continue
         n_highest_vars += 1
     end
     is_balanced = n_highest_vars == neqs
@@ -335,6 +345,10 @@ function get_new_mm(
         for i in Iterators.drop(eachindex(indices), 1)
             if new_row_col_i[indices[i]] == new_row_col_i[indices[i - 1]]
                 final_row_vals[end] += new_row_val_i[indices[i]]
+                if iszero(final_row_vals[end])
+                    pop!(final_row_cols)
+                    pop!(final_row_vals)
+                end
             else
                 push!(final_row_cols, new_row_col_i[indices[i]])
                 push!(final_row_vals, new_row_val_i[indices[i]])
