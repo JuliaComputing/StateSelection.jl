@@ -26,6 +26,7 @@ UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
 BipartiteGraphs = "0.1.3"
 CommonSolve = "0.2"
 DocStringExtensions = "0.7, 0.8, 0.9"
+ForwardDiff = "1.3"
 Graphs = "1"
 LinearAlgebra = "1"
 ModelingToolkit = "11"
@@ -44,8 +45,9 @@ UUIDs = "1"
 julia = "1.10"
 
 [extras]
+ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
 ModelingToolkit = "961ee093-0014-501f-94e3-6117800e7a78"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["Test", "ModelingToolkit"]
+test = ["Test", "ModelingToolkit", "ForwardDiff"]
