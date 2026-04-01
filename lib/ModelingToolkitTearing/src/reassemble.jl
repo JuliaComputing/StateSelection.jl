@@ -606,6 +606,10 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
     else
         reference = fullvars[state_idx]
     end
+    reference = Symbolics.STerm(
+        promote, Symbolics.SArgsT((reference, MTKBase.get_iv(sys)::SymbolicT));
+        type = Vector{Real}, shape = [1:2]
+    )[1]
     sys, A_cache = MTKBase.add_diffcache(sys, length(A))
     A_allocator = A_cache(reference)
     A = SU.Code.with_allocator(A_allocator, SU.Const{VartypeT}(A))

@@ -8,6 +8,7 @@ using Graphs
 import StateSelection
 using ModelingToolkit: t_nounits as t, D_nounits as D
 import SymbolicUtils as SU
+using ForwardDiff
 
 @testset "`InferredDiscrete` validation" begin
     k = ShiftIndex()
@@ -109,4 +110,31 @@ end
     sys = mtkcompile(sys)
     @test isempty(unknowns(sys))
     @test length(observed(sys)) == 2
+end
+
+@testset "Duals through inline linear SCC DiffCaches" begin
+    @variables x(t) y(t) z(t) w(t) q(t)
+    reassemble_alg = MTKTearing.DefaultReassembleAlgorithm(; inline_linear_sccs = true)
+    @mtkcompile sys = System(
+        [
+            D(x) ~ 2t + 1,
+            t * y + x * z + w ~ 4,
+            4y + 3z + 2w ~ 7,
+            2x * y + 3t * z + w ~ 10,
+            D(q) ~ 2w,
+        ],
+        t
+    ) reassemble_alg = reassemble_alg
+
+    prob = ODEProblem(sys, [x => 1, q => 1], (0.0, 1.0); guesses = [x => 1, y => 1, z => 1, w => 1, q => 1])
+
+    buffer = similar(prob.u0)
+    @test_nowarn ForwardDiff.jacobian(buffer, prob.u0) do du, u
+        @test eltype(u) <: ForwardDiff.Dual
+        prob.f.f.f_iip(du, u, prob.p, 1.0)
+    end
+    @test_nowarn ForwardDiff.derivative(buffer, 1.2) do du, t
+        @test t isa ForwardDiff.Dual
+        prob.f.f.f_iip(du, prob.u0, prob.p, t)
+    end
 end
