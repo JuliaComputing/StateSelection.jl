@@ -59,6 +59,23 @@ mutable struct TearingState <: StateSelection.TransformationState{System}
     are not used in the rest of the system.
     """
     additional_observed::Vector{Equation}
+    """
+    Corresponding to `fullvars`, marks variables which may not be structurally present in
+    any equation according to `structure.graph` but should not be considered as unused.
+    This is typically used by variables on the RHS of equations in `additional_observed`,
+    and is useful for ensuring the consistency check is valid. For example, a simplification
+    pass prior to `StateSelection.check_consistency` may process the equations
+    ```julia
+    a ~ b
+    b ~ c
+    c ~ a
+    ```
+    Into `additional_observed = [a ~ b, c ~ b]`, and thus end up in a state where
+    there are no equations and `fullvars = [b]`. The consistency check would consider `b` as
+    unused and the system as fully determined, but in reality `b` should be considered
+    as used and the system singular.
+    """
+    always_present::BitVector
     statemachines::Vector{System}
     """
     Source information for each equation in the `TearingState`. `Vector{Symbol}` for each
@@ -325,7 +342,8 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
     structure = SystemStructure(complete(var_to_diff), complete(eq_to_diff),
                                 complete(graph), nothing, var_types, state_priorities, false)
     return TearingState(sys, fullvars, structure, Equation[], param_derivative_map,
-                        no_deriv_params, original_eqs, Equation[], typeof(sys)[], sources)
+                        no_deriv_params, original_eqs, Equation[], falses(length(fullvars)),
+                        typeof(sys)[], sources)
 end
 
 function build_state_priorities(sys::System, fullvars::Vector{SymbolicT}, var_to_diff::StateSelection.DiffGraph)

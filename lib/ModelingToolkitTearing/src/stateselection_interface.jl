@@ -5,6 +5,7 @@ function StateSelection.var_derivative!(ts::TearingState, v::Int)
     D = Differential(MTKBase.get_iv(sys))
     push!(ts.fullvars, D(ts.fullvars[v]))
     push!(ts.structure.state_priorities, ts.structure.state_priorities[v])
+    push!(ts.always_present, ts.always_present[v])
     return var_diff
 end
 
@@ -348,6 +349,7 @@ function StateSelection.rm_eqs_vars!(
         structure, eqs_to_rm, vars_to_rm; eqs_sorted_and_uniqued, vars_sorted_and_uniqued
     )
     deleteat!(state.fullvars, vars_to_rm)
+    deleteat!(state.always_present, vars_to_rm)
     eqs = copy(MTKBase.get_eqs(state.sys))
     deleteat!(eqs, eqs_to_rm)
     deleteat!(state.original_eqs, eqs_to_rm)
@@ -361,3 +363,6 @@ function StateSelection.rm_eqs_vars!(
     return old_to_new_eq, old_to_new_var
 end
 
+function StateSelection.is_unused_var(state::TearingState, var::Integer)
+    return !state.always_present[var] && isempty(𝑑neighbors(state.structure.graph, var))
+end
