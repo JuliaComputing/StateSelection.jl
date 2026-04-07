@@ -606,9 +606,14 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
     else
         reference = fullvars[state_idx]
     end
+    reference_args = Symbolics.SArgsT((reference, MTKBase.get_iv(sys)::SymbolicT))
+    inps = MTKBase.inputs(sys)
+    if !isempty(inps)
+        push!(reference_args, first(inps))
+    end
     reference = Symbolics.STerm(
-        promote, Symbolics.SArgsT((reference, MTKBase.get_iv(sys)::SymbolicT));
-        type = Vector{Real}, shape = [1:2]
+        promote, reference_args;
+        type = Vector{Real}, shape = [1:length(reference_args)]
     )[1]
     sys, A_cache = MTKBase.add_diffcache(sys, length(A))
     A_allocator = A_cache(reference)
@@ -846,7 +851,6 @@ Solve equation `eq` for `var`, substitute previously solved variables, and retur
 function make_solved_equation(var, eq, total_sub; simplify = false)
     residual = eq.lhs - eq.rhs
     a, b, islinear = Symbolics.linear_expansion(residual, var)
-    @assert islinear
     # 0 ~ a * var + b
     # var ~ -b/a
     if SU._iszero(a)
