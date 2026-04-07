@@ -268,8 +268,8 @@ function StateSelection.find_eq_solvables!(state::TearingState, ieq, to_rm = Int
             conservative && continue
         elseif conservative && abs(a) > 1
             continue
-        else
-            coeffs === nothing || push!(coeffs, a)
+        elseif coeffs !== nothing && (!iszero(a) || !may_be_zero)
+            push!(coeffs, a)
         end
 
         if !iszero(a)

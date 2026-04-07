@@ -8,6 +8,7 @@ using Graphs
 import StateSelection
 using ModelingToolkit: t_nounits as t, D_nounits as D
 import SymbolicUtils as SU
+using Setfield
 using ForwardDiff
 
 @testset "`InferredDiscrete` validation" begin
@@ -137,4 +138,20 @@ end
         @test t isa ForwardDiff.Dual
         prob.f.f.f_iip(du, prob.u0, prob.p, t)
     end
+end
+
+@testset "`find_eq_solvables!` with `may_be_zero = true` doesn't push 0 elements to `coeffs`" begin
+    @variables x y z
+    @named sys = System([x + y + z ~ 0])
+    ts = TearingState(sys)
+    # Artificially remove symbolic incidence
+    @set! ts.sys.eqs = [0 ~ -x]
+    ts.structure.solvable_graph = BipartiteGraph(1, 3)
+    to_rm = Int[]
+    coeffs = Int[]
+    StateSelection.find_eq_solvables!(ts, 1, to_rm, coeffs)
+    @test issetequal(ts.fullvars[to_rm], [y, z])
+    # Previously, this would have zeros corresponding to `y` and `z`, and yet the incidence for those
+    # variables is removed from `ts.structure.graph`. This would cause incorrect values in `linear_subsys_adjmat!`
+    @test coeffs == [-1]
 end
