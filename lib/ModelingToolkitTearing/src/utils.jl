@@ -82,3 +82,97 @@ macro union_split_var(annotated_var::Expr, block::Expr)
 
     return esc(expr)
 end
+
+"""
+    $TYPEDSIGNATURES
+
+Debugging tool useful for comparing two `SystemStructure`s. Return a copy of `structure` with
+variables reordered according to `oldtonewvar` and equations according to `oldtoneweq`.
+"""
+function permute(structure::SystemStructure, oldtonewvar::Vector{Int}, oldtoneweq::Vector{Int})
+    graph = BipartiteGraph(nsrcs(structure.graph), ndsts(structure.graph))
+    for e in 𝑠vertices(structure.graph)
+        for v in 𝑠neighbors(structure.graph, e)
+            add_edge!(graph, oldtoneweq[e], oldtonewvar[v])
+        end
+    end
+    solvable_graph = BipartiteGraph(nsrcs(structure.solvable_graph), ndsts(structure.solvable_graph))
+    for e in 𝑠vertices(structure.solvable_graph)
+        for v in 𝑠neighbors(structure.solvable_graph, e)
+            add_edge!(solvable_graph, oldtoneweq[e], oldtonewvar[v])
+        end
+    end
+    var_to_diff = StateSelection.DiffGraph(ndsts(graph))
+    for i in 𝑑vertices(structure.graph)
+        if structure.var_to_diff[i] isa Int
+            var_to_diff[oldtonewvar[i]] = oldtonewvar[structure.var_to_diff[i]]
+        end
+    end
+    eq_to_diff = StateSelection.DiffGraph(nsrcs(graph))
+    for i in 𝑠vertices(structure.graph)
+        if structure.eq_to_diff[i] isa Int
+            eq_to_diff[oldtoneweq[i]] = oldtoneweq[structure.eq_to_diff[i]]
+        end
+    end
+
+    var_types = similar(structure.var_types)
+    sps = similar(structure.state_priorities)
+    for i in 𝑑vertices(structure.graph)
+        var_types[oldtonewvar[i]] = structure.var_types[i]
+        sps[oldtonewvar[i]] = structure.state_priorities[i]
+    end
+
+    return SystemStructure(var_to_diff, eq_to_diff, graph, solvable_graph, var_types, sps, structure.only_discrete)
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Debugging tool useful for comparing two `TearingState`s. Return a copy of `ts` with
+variables reordered according to `oldtonewvar` and equations according to `oldtoneweq`.
+"""
+function permute(ts::TearingState, oldtonewvar::Vector{Int}, oldtoneweq::Vector{Int})
+    structure = permute(ts.structure, oldtonewvar, oldtoneweq)
+    fullvars = similar(ts.fullvars)
+    always_present = similar(ts.always_present)
+    for i in eachindex(fullvars)
+        fullvars[oldtonewvar[i]] = ts.fullvars[i]
+        always_present[oldtonewvar[i]] = ts.always_present[i]
+    end
+    original_eqs = similar(ts.original_eqs)
+    eqs_source = similar(ts.eqs_source)
+    eqs = collect(equations(ts))
+    for i in eachindex(original_eqs)
+        original_eqs[oldtoneweq[i]] = ts.original_eqs[i]
+        eqs_source[oldtoneweq[i]] = ts.eqs_source[i]
+        eqs[oldtoneweq[i]] = equations(ts)[i]
+    end
+    
+    sys = ts.sys
+    @set! sys.eqs = eqs
+    @set! sys.unknowns = fullvars
+    return TearingState(sys, fullvars, structure, Equation[], ts.param_derivative_map, ts.no_deriv_params, original_eqs, ts.additional_observed, always_present, ts.statemachines, eqs_source)
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Debugging tool useful for comparing two `SparseMatrixCLIL`s. Return a copy of `mm` with
+variables reordered according to `oldtonewvar` and equations according to `oldtoneweq`.
+"""
+function permute(mm::StateSelection.SparseMatrixCLIL{S, T}, oldtonewvar::Vector{Int}, oldtoneweq::Vector{Int}) where {S, T}
+    nzrows = copy(mm.nzrows)
+    rowcols = copy(mm.row_cols)
+    rowvals = copy(mm.row_vals)
+    for i in eachindex(nzrows)
+        nzrows[i] = oldtoneweq[nzrows[i]]
+        for j in eachindex(rowcols[i])
+            rowcols[i][j] = oldtonewvar[rowcols[i][j]]
+        end
+        perm = sortperm(rowcols[i])
+        rowcols[i] = rowcols[i][perm]
+        rowvals[i] = rowvals[i][perm]
+    end
+
+    return StateSelection.SparseMatrixCLIL{S, T}(mm.nparentrows, mm.ncols, nzrows, rowcols, rowvals)
+end

@@ -1,7 +1,7 @@
 module StateSelectionDeepDiffsExt
 
 using DeepDiffs
-using BipartiteGraphs: Label, BipartiteAdjacencyList, unassigned, HighlightInt
+using BipartiteGraphs: Label, BipartiteAdjacencyList, unassigned, HighlightInt, Unassigned
 using StateSelection: SystemStructure,
                        MatchedSystemStructure,
                        SystemStructurePrintMatrix
