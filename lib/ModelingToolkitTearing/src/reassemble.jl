@@ -243,9 +243,20 @@ function generate_derivative_variables!(
             push!(scc_del_idxs, j_)
         end
         # `dv` still needs to be present in some SCC. Since we solve for `dv` from
-        # `0 ~ D(x) - x_t`, it is in its own SCC. This new singleton SCC is solved
-        # immediately before the one that `dv` used to be in (`i`)
-        sccs_to_insert[k] = (i, [dv])
+        # `0 ~ D(x) - x_t`, it is in its own SCC. This new singleton SCC must run
+        # before the SCC containing var_to_diff[dv] (the 2nd-order derivative), because
+        # `generate_system_equations!` populates `total_sub[D(x)] = x_t` when processing
+        # this singleton, and the DerivativeDict substitution for D(D(x)) requires D(x)
+        # to already be in `total_sub`. If the original SelectedState SCC for `dv` was
+        # placed after the 2nd-order derivative SCC in BLT order (e.g. when the dynamics
+        # equation has no incidence on `dv`), inserting at position `i` is too late.
+        ddv = var_to_diff[dv]
+        i_insert = if ddv isa Int && ddv <= length(v_to_scc)
+            min(i, v_to_scc[ddv][1])
+        else
+            i
+        end
+        sccs_to_insert[k] = (i_insert, [dv])
     end
     sort!(sccs_to_insert, by = first)
     # remove the idxs we need to remove
