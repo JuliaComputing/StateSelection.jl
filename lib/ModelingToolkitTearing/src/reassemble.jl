@@ -1080,7 +1080,7 @@ $TYPEDFIELDS
     handled using inline linear solves via `LinearSolve.jl`. By default, such
     SCCs generate algebraic equations.
     """
-    inline_linear_sccs::Bool = false
+    inline_linear_sccs::Bool = true
     """
     If `inline_linear_sccs == true`, this is the maximum size of a system of linear
     equations which is solved symbolically rather than using `LinearSolve.jl`.
