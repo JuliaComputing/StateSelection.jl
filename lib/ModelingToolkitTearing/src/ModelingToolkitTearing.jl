@@ -159,8 +159,8 @@ function MTKBase.unhack_system(sys::System)
     subst = SU.Substituter{false}(additional_subs, SU.default_substitute_filter)
     obseqs = obseqs[obs_mask]
     map!(subst, obseqs, obseqs)
-    map!(subst, additional_eqs, additional_eqs)
     append!(eqs, additional_eqs)
+    map!(subst, eqs, eqs)
 
     if sched isa MTKBase.Schedule
         map!(subst, values(sched.dummy_sub))
@@ -190,14 +190,7 @@ function populate_inline_scc_map!(
     is_ldiv || return
     len = length(ldiv)
     buffer = get!(() -> zeros(Int, len), inline_linear_scc_map, ldiv)
-    if !iszero(buffer[idx])
-        is_diffeq && return
-        throw(ArgumentError("""
-        Found multiple inline linear solves solving the same variable. \
-        This should not be possible. Please open an issue in \
-        `ModelingToolkit.jl` with an MWE.
-        """))
-    end
+    iszero(buffer[idx]) || return
     buffer[idx] = ifelse(is_diffeq, -eq_i, eq_i)
 end
 
