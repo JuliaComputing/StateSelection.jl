@@ -565,15 +565,24 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
         # Substitute solved differential equations
         resid = Symbolics.fixpoint_sub(
             resid, total_sub, MTKBase.Shift; maxiters = max(2length(total_sub), 10))
-        # Standard `linear_expansion`-based process
-        for (varidx, var) in enumerate(vars)
-            a, resid, islinear = Symbolics.linear_expansion(resid, var)
-            islinear || return nothing
-            A[eqidx, varidx] = a
-        end
-        # `-` is important! `b` is on the other side of the equality.
-        b[eqidx] = -resid
+        b[eqidx] = resid
     end
+
+    for (varidx, var) in enumerate(vars)
+        lex = Symbolics.LinearExpander(var; strict = true)
+        for (eqidx, resid) in enumerate(b)
+            p, q, islinear = lex(resid)
+            islinear || return nothing
+            A[eqidx, varidx] = p
+            b[eqidx] = q
+        end
+    end
+
+    # `-` is important! `b` is on the other side of the equality.
+    for i in eachindex(b)
+        b[i] = -b[i]
+    end
+
     if N <= analytical_linear_scc_limit && _check_allow_symbolic_parameter(
             state, A, allow_symbolic, allow_parameter
         )
