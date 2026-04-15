@@ -57,13 +57,14 @@ include("reassemble.jl")
 
 struct UnhackSystemCacheKey end
 
+function MTKBase.should_invalidate_mutable_cache_entry(::Type{UnhackSystemCacheKey}, patch::NamedTuple)
+    return true
+end
+
 function MTKBase.unhack_system(sys::System)
-    cache = getmetadata(sys, MTKBase.MutableCacheKey, nothing)
-    if cache isa MTKBase.MutableCacheKey
-        cached_sys = get(cache, UnhackSystemCacheKey, nothing)
-        if cached_sys isa System
-            return cached_sys
-        end
+    cached_sys = MTKBase.check_mutable_cache(sys, UnhackSystemCacheKey, System, nothing)
+    if cached_sys isa System
+        return cached_sys
     end
     # Observed are copied by the masking operation
     obseqs = observed(sys)
@@ -173,9 +174,7 @@ function MTKBase.unhack_system(sys::System)
     @set! newsys.unknowns = dvs
     @set! newsys.schedule = sched
 
-    if cache isa MTKBase.MutableCacheT
-        cache[UnhackSystemCacheKey] = newsys
-    end
+    MTKBase.store_to_mutable_cache!(sys, UnhackSystemCacheKey, newsys)
 
     return newsys
 end
