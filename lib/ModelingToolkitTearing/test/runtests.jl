@@ -155,3 +155,17 @@ end
     # variables is removed from `ts.structure.graph`. This would cause incorrect values in `linear_subsys_adjmat!`
     @test coeffs == [-1]
 end
+
+@testset "Inline linear SCC uses strict form of `linear_expansion`" begin
+    @variables x(t) y(t) z(t) w(t) p(t)
+    # Without strict form, the `ifelse` is considered linear in `z`
+    @test_nowarn @mtkcompile sys = System(
+        [
+            D(x) ~ 2x + t
+            y + 2z + 3w ~ 4
+            2y + 4ifelse(z < 0, 2z, 3z) + 7w ~ 12
+            3y - 2z + 5w ~ 13
+            D(p) ~ 2y + 3w + z
+        ], t
+    ) reassemble_alg = MTKTearing.DefaultReassembleAlgorithm(; inline_linear_sccs = true)
+end
