@@ -1,6 +1,6 @@
 name = "ModelingToolkitTearing"
 uuid = "6bb917b9-1269-42b9-9f7c-b0dca72083ab"
-version = "1.12.3"
+version = "1.13.0"
 authors = ["Aayush Sabharwal <aayush.sabharwal@gmail.com>"]
 
 [deps]
@@ -34,7 +34,7 @@ ModelingToolkitBase = "1.23"
 Moshi = "0.3"
 OffsetArrays = "1"
 OrderedCollections = "1.8.1"
-SciMLBase = "2.108"
+SciMLBase = "2.108, 3"
 Setfield = "0.7, 0.8, 1"
 SparseArrays = "1"
 StateSelection = "1.9"
