@@ -52,8 +52,8 @@ function (alg::CarpanzanoTearing)(structure::SystemStructure)
     full_var_eq_matching = copy(var_eq_matching)
     var_sccs = find_var_sccs(graph, var_eq_matching)
 
-    active_vars = Set{Int}()
-    active_eqs = Set{Int}()
+    active_vars = OrderedSet{Int}()
+    active_eqs = OrderedSet{Int}()
     for vars in var_sccs
         for var in vars
             # Identify variables and equations in this SCC
@@ -87,7 +87,7 @@ In the context of the paper, `structure.graph` is the associated bipartite graph
 """
 function find_single_solvable_eq!(
         structure::SystemStructure, var_eq_matching::MatchingT,
-        active_vars::Set{Int}, active_eqs::Set{Int}, condition::F = _ -> true;
+        active_vars::AbstractSet{Int}, active_eqs::AbstractSet{Int}, condition::F = _ -> true;
         nbors_buffer::Vector{Int} = Int[]
     ) where {F}
     (; graph, solvable_graph) = structure
@@ -116,7 +116,7 @@ all of `active_vars` to `unassigned`, and will be modified to match solvable var
 """
 function carpanzano_tear_scc!(
         alg::CarpanzanoTearing, structure::SystemStructure, var_eq_matching::MatchingT,
-        active_vars::Set{Int}, active_eqs::Set{Int}
+        active_vars::AbstractSet{Int}, active_eqs::AbstractSet{Int}
     )
     # TODO: This is an implementation of algorithm A1 in the paper. Find an efficient
     # way to implement algorithm A2 and analyze the benefits.
@@ -211,6 +211,8 @@ function carpanzano_tear_scc!(
             solvable_cnt = count(in(active_eqs), 𝑑neighbors(solvable_graph, ivar))
             if iszero(alg_var) || cnt > max_incidence_cnt || cnt == max_incidence_cnt && solvable_cnt < min_solvable_cnt
                 alg_var = ivar
+                max_incidence_cnt = cnt
+                min_solvable_cnt = solvable_cnt
             end
         end
 
