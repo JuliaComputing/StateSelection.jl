@@ -1,7 +1,4 @@
 # Tests for carpanzano_tearing.jl - determinism and Heuristic 2 correctness
-#
-# These tests call carpanzano_tear_scc! directly so they have no dependency on
-# ModelingToolkit or any other heavy upstream package.
 
 using BipartiteGraphs
 import Graphs: add_edge!
