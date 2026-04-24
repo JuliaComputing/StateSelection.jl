@@ -92,7 +92,8 @@ function find_single_solvable_eq!(
     ) where {F}
     (; graph, solvable_graph) = structure
     nbors = nbors_buffer
-    for ieq in active_eqs
+    # Sort active_eqs iteration for deterministic equation selection regardless of hash order
+    for ieq in sort(collect(active_eqs))
         empty!(nbors)
         append!(nbors, Iterators.filter(in(active_vars), 𝑠neighbors(graph, ieq)))
         length(nbors) == 1 || continue
@@ -161,7 +162,8 @@ function carpanzano_tear_scc!(
         # is the corresponding number of incident edges.
         empty!(enodes_with_min_incidence)
         min_incidence_cnt = typemax(Int)
-        for ieq in active_eqs
+        # Sort active_eqs for deterministic tie-breaking regardless of hash order
+        for ieq in sort(collect(active_eqs))
             cnt = count(in(active_vars), 𝑠neighbors(graph, ieq))
             cnt > min_incidence_cnt && continue
             if cnt == min_incidence_cnt
@@ -206,11 +208,14 @@ function carpanzano_tear_scc!(
         alg_var = 0
         max_incidence_cnt = typemin(Int)
         min_solvable_cnt = typemax(Int)
-        for ivar in active_vars
+        # Sort active_vars for deterministic selection; also fix missing max/min updates
+        for ivar in sort(collect(active_vars))
             cnt = count(in(active_eqs), 𝑑neighbors(graph, ivar))
             solvable_cnt = count(in(active_eqs), 𝑑neighbors(solvable_graph, ivar))
             if iszero(alg_var) || cnt > max_incidence_cnt || cnt == max_incidence_cnt && solvable_cnt < min_solvable_cnt
                 alg_var = ivar
+                max_incidence_cnt = cnt
+                min_solvable_cnt = solvable_cnt
             end
         end
 
