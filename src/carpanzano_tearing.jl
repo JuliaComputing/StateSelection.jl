@@ -52,8 +52,8 @@ function (alg::CarpanzanoTearing)(structure::SystemStructure)
     full_var_eq_matching = copy(var_eq_matching)
     var_sccs = find_var_sccs(graph, var_eq_matching)
 
-    active_vars = Set{Int}()
-    active_eqs = Set{Int}()
+    active_vars = OrderedSet{Int}()
+    active_eqs = OrderedSet{Int}()
     for vars in var_sccs
         for var in vars
             # Identify variables and equations in this SCC
@@ -87,13 +87,12 @@ In the context of the paper, `structure.graph` is the associated bipartite graph
 """
 function find_single_solvable_eq!(
         structure::SystemStructure, var_eq_matching::MatchingT,
-        active_vars::Set{Int}, active_eqs::Set{Int}, condition::F = _ -> true;
+        active_vars::AbstractSet{Int}, active_eqs::AbstractSet{Int}, condition::F = _ -> true;
         nbors_buffer::Vector{Int} = Int[]
     ) where {F}
     (; graph, solvable_graph) = structure
     nbors = nbors_buffer
-    # Sort active_eqs iteration for deterministic equation selection regardless of hash order
-    for ieq in sort(collect(active_eqs))
+    for ieq in active_eqs
         empty!(nbors)
         append!(nbors, Iterators.filter(in(active_vars), 𝑠neighbors(graph, ieq)))
         length(nbors) == 1 || continue
@@ -117,7 +116,7 @@ all of `active_vars` to `unassigned`, and will be modified to match solvable var
 """
 function carpanzano_tear_scc!(
         alg::CarpanzanoTearing, structure::SystemStructure, var_eq_matching::MatchingT,
-        active_vars::Set{Int}, active_eqs::Set{Int}
+        active_vars::AbstractSet{Int}, active_eqs::AbstractSet{Int}
     )
     # TODO: This is an implementation of algorithm A1 in the paper. Find an efficient
     # way to implement algorithm A2 and analyze the benefits.
@@ -162,8 +161,7 @@ function carpanzano_tear_scc!(
         # is the corresponding number of incident edges.
         empty!(enodes_with_min_incidence)
         min_incidence_cnt = typemax(Int)
-        # Sort active_eqs for deterministic tie-breaking regardless of hash order
-        for ieq in sort(collect(active_eqs))
+        for ieq in active_eqs
             cnt = count(in(active_vars), 𝑠neighbors(graph, ieq))
             cnt > min_incidence_cnt && continue
             if cnt == min_incidence_cnt
@@ -208,8 +206,7 @@ function carpanzano_tear_scc!(
         alg_var = 0
         max_incidence_cnt = typemin(Int)
         min_solvable_cnt = typemax(Int)
-        # Sort active_vars for deterministic selection; also fix missing max/min updates
-        for ivar in sort(collect(active_vars))
+        for ivar in active_vars
             cnt = count(in(active_eqs), 𝑑neighbors(graph, ivar))
             solvable_cnt = count(in(active_eqs), 𝑑neighbors(solvable_graph, ivar))
             if iszero(alg_var) || cnt > max_incidence_cnt || cnt == max_incidence_cnt && solvable_cnt < min_solvable_cnt
