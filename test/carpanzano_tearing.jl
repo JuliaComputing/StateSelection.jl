@@ -3,7 +3,6 @@
 using BipartiteGraphs
 import Graphs: add_edge!
 
-# Minimal concrete SystemStructure used only in these tests.
 struct TestSystemStructure <: StateSelection.SystemStructure
     graph::BipartiteGraph{Int,Nothing}
     solvable_graph::BipartiteGraph{Int,Nothing}
