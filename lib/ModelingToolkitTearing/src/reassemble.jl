@@ -548,7 +548,6 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
     N = length(alg_eqs)
     vars = Symbolics.fixpoint_sub(fullvars[alg_vars], total_sub; maxiters = max(length(total_sub), 10))
 
-    # Linear coefficients
     A = fill(Num(Symbolics.COMMON_ZERO), N, N)
     b = fill(Symbolics.COMMON_ZERO, N)
 
@@ -626,6 +625,33 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
     else
         reference = fullvars[state_idx]
     end
+    # Use the `ArrayMaker` form for `A` and `b`
+    A_regions = SU.RegionsT()
+    A_values = Symbolics.SArgsT()
+    b_regions = SU.RegionsT()
+    b_values = Symbolics.SArgsT()
+    # fill the entire thing with zeros
+    push!(A_regions, SU.ShapeVecT((1:N, 1:N)))
+    push!(A_values, SU.Fill(A_regions[1])(Symbolics.COMMON_ZERO))
+    push!(b_regions, SU.ShapeVecT((1:N,)))
+    push!(b_values, SU.Fill(b_regions[1])(Symbolics.COMMON_ZERO))
+
+    for i in axes(A, 1), j in axes(A, 2)
+        coeff = unwrap(A[i, j])
+        SU._iszero(coeff) && continue
+        push!(A_regions, SU.ShapeVecT((i:i, j:j)))
+        push!(A_values, Symbolics.SConst([coeff;;]))
+    end
+
+    for (i, resid) in enumerate(b)
+        SU._iszero(resid) && continue
+        push!(b_regions, SU.ShapeVecT((i:i,)))
+        push!(b_values, Symbolics.SConst([resid]))
+    end
+
+    A = SU.ArrayMaker{VartypeT}(A_regions, A_values; shape = SU.ShapeVecT((1:N, 1:N)))
+    b = SU.ArrayMaker{VartypeT}(b_regions, b_values; shape = SU.ShapeVecT((1:N,)))
+
     reference_args = Symbolics.SArgsT((reference, MTKBase.get_iv(sys)::SymbolicT))
     inps = MTKBase.inputs(sys)
     if !isempty(inps)
@@ -635,13 +661,14 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
         promote, reference_args;
         type = Vector{Real}, shape = [1:length(reference_args)]
     )[1]
-    sys, A_cache = MTKBase.add_diffcache(sys, length(A))
+    sys, A_cache = MTKBase.add_diffcache(sys, N * N)
     A_allocator = A_cache(reference)
     A = SU.Code.with_allocator(A_allocator, SU.Const{VartypeT}(A))
-    sys, b_cache = MTKBase.add_diffcache(sys, length(b))
+    sys, b_cache = MTKBase.add_diffcache(sys, N)
     b_allocator = b_cache(reference)
     b = SU.Code.with_allocator(b_allocator, SU.Const{VartypeT}(b))
     state.sys = sys
+
     return INLINE_LINEAR_SCC_OP(A, b)
 end
 
