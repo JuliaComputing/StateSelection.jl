@@ -62,6 +62,9 @@ function trivial_tearing!(ts::TransformationState, mm::Union{SparseMatrixCLIL, N
         for (i, vari) in candidates
             # don't check already torn equations
             i in trivial_idxs && continue
+            if has_state_priorities(ts.structure)
+                get_state_priorities(ts.structure)[vari] <= 0 || continue
+            end
 
             # if a variable was the LHS of two trivial observed equations, we wouldn't have
             # included it in the list. Error if somehow it made it through.
