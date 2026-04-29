@@ -190,3 +190,21 @@ end
     @test sub.state_priorities == [2, 5, 2, 5]
 end
 
+@testset "`trivial_tearing!` does not eliminate variables with positive state priority" begin
+    # y only appears in `y ~ 2x`, making it a candidate for trivial tearing
+    @variables x(t) y(t)
+    @named sys = System([D(x) ~ x, y ~ 2x], t)
+    ts = TearingState(sys)
+    StateSelection.trivial_tearing!(ts)
+    # Without state_priority, y is trivially torn into additional_observed
+    @test findfirst(isequal(y), ts.fullvars) === nothing
+    @test any(eq -> isequal(eq.lhs, y), ts.additional_observed)
+
+    # With positive state_priority, y should not be trivially torn
+    @variables x(t) y(t) [state_priority = 1]
+    @named sys = System([D(x) ~ x, y ~ 2x], t)
+    ts = TearingState(sys)
+    StateSelection.trivial_tearing!(ts)
+    @test findfirst(isequal(y), ts.fullvars) !== nothing
+    @test !any(eq -> isequal(eq.lhs, y), ts.additional_observed)
+end
