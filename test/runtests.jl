@@ -4,6 +4,7 @@ using SparseArrays
 using Test
 
 include("bareiss.jl")
+include("carpanzano_tearing.jl")
 
 @testset "`get_new_mm`" begin
     mm = SSel.CLIL.SparseMatrixCLIL(
