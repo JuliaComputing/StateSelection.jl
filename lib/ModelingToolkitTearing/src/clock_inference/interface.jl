@@ -118,6 +118,8 @@ function system_subset(structure::SystemStructure, ieqs::Vector{Int}, ivars::Vec
     @set! structure.graph = complete(BipartiteGraph(ne, fadj, length(ivars)))
     @set! structure.eq_to_diff = eq_to_diff
     @set! structure.var_to_diff = complete(var_to_diff)
+    @set! structure.state_priorities = structure.state_priorities[ivars]
+    @set! structure.var_types = structure.var_types[ivars]
     structure
 end
 

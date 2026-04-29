@@ -169,3 +169,24 @@ end
         ], t
     ) reassemble_alg = MTKTearing.DefaultReassembleAlgorithm(; inline_linear_sccs = true)
 end
+
+@testset "`system_subset(::SystemStructure)` subsets `.state_priorities`" begin
+    @variables x(t) y(t) [state_priority = 2] z(t) [state_priority = 5]
+    @named sys = System([D(x) ~ x, D(y) ~ y, D(z) ~ z], t)
+    ts = TearingState(sys)
+
+    # Confirm priorities are set as expected in the full structure
+    x_idx = findfirst(isequal(x), ts.fullvars)::Int
+    y_idx = findfirst(isequal(y), ts.fullvars)::Int
+    z_idx = findfirst(isequal(z), ts.fullvars)::Int
+    @test ts.structure.state_priorities[x_idx] == 0
+    @test ts.structure.state_priorities[y_idx] == 2
+    @test ts.structure.state_priorities[z_idx] == 5
+
+    # Subset to only y and z
+    ieqs = [𝑑neighbors(ts.structure.graph, y_idx); 𝑑neighbors(ts.structure.graph, z_idx)]
+    ivars = [y_idx, z_idx, ts.structure.var_to_diff[y_idx], ts.structure.var_to_diff[z_idx]]
+    sub = MTKTearing.system_subset(ts.structure, ieqs, ivars)
+    @test sub.state_priorities == [2, 5, 2, 5]
+end
+
