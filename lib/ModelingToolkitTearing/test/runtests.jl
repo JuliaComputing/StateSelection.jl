@@ -208,3 +208,15 @@ end
     @test findfirst(isequal(y), ts.fullvars) !== nothing
     @test !any(eq -> isequal(eq.lhs, y), ts.additional_observed)
 end
+
+@testset "`rm_eqs_vars!` does not require calling `complete`" begin
+    @variables x(t) y(t)
+    @named sys = System([D(x) ~ 2x + 1, D(y) ~ 2y + 1], t)
+    ts = TearingState(sys)
+    xidx = findfirst(isequal(x), ts.fullvars)::Int
+    dxidx = ts.structure.var_to_diff[xidx]::Int
+    eqidx = only(𝑑neighbors(ts.structure.graph, dxidx))::Int
+    StateSelection.rm_eqs_vars!(ts, [eqidx], [xidx, dxidx])
+    @test length(equations(ts)) == 1
+    @test length(ts.fullvars) == 2
+end
