@@ -237,7 +237,6 @@ function default_rm_eqs_vars!(
     old_to_new_eq, n_new_eqs = get_old_to_new_idxs(nsrcs(graph), eqs_to_rm)
     old_to_new_var, n_new_vars = get_old_to_new_idxs(ndsts(graph), vars_to_rm)
 
-    diff_to_var = invview(var_to_diff)
     new_graph = BipartiteGraph(n_new_eqs, n_new_vars)
     if solvable_graph !== nothing
         new_solvable_graph = BipartiteGraph(n_new_eqs, n_new_vars)
