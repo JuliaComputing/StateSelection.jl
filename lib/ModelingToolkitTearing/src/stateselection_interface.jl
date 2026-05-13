@@ -101,7 +101,7 @@ end
 function maybe_zeros_descend(ex::SymbolicT)
     @match ex begin
         BSImpl.AddMul(; variant) => return variant === SU.AddMulVariant.MUL
-        BSImpl.Term(; f) => return f === (^) || f === sin || f === adjoint || f === LinearAlgebra.dot || f === getindex
+        BSImpl.Term(; f) => return f === (^) || f === sin || f === adjoint || f === LinearAlgebra.dot || f === getindex || f === ifelse || f === max || f === min
         _ => return false
     end
 end
@@ -140,6 +140,7 @@ function (qf::MaybeZeroQueryFn)(ex::SymbolicT)
     MTKBase.split_indexed_var(ex)[1] in maybe_zeros && return true
     pred = in(maybe_zeros) ∘ first ∘ MTKBase.split_indexed_var
     @match ex begin
+        BSImpl.Const(; val) => SU._iszero(val)
         BSImpl.AddMul(; dict, variant) && if variant === SU.AddMulVariant.MUL end => begin
             return any(pred, keys(dict))
         end
@@ -147,10 +148,12 @@ function (qf::MaybeZeroQueryFn)(ex::SymbolicT)
             return SU._iszero(coeff) && all(Base.Fix1(query_maybe_zeros, qf), keys(dict))
         end
         BSImpl.Term(; f, args) => begin
-            if f === (^) || f === sin || f === adjoint || f === LinearAlgebra.dot
+            if f === (^) || f === sin || f === adjoint || f === LinearAlgebra.dot || f === max || f === min
                 return any(pred, args)
             elseif f === getindex
                 return args[1] in maybe_zeros
+            elseif f === ifelse
+                return pred(args[2]) || pred(args[3])
             end
             return false
         end
