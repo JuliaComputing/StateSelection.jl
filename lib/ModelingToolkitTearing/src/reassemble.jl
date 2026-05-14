@@ -503,7 +503,7 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
     offset = 1
     findnextfn = let diff_vars_set = diff_vars_set, solved_vars_set = solved_vars_set,
         diff_to_var = diff_to_var, ispresent = ispresent
-        j -> !(j in diff_vars_set || j in solved_vars_set) && diff_to_var[j] === nothing &&
+        j -> !(j in diff_vars_set || j in solved_vars_set || j in extra_vars) && diff_to_var[j] === nothing &&
             ispresent(j)
     end
     for (i, v) in enumerate(var_ordering)
@@ -1028,6 +1028,15 @@ function update_simplified_system!(
     unknown_idxs = filter(filterer, eachindex(state.fullvars))
     unknowns = state.fullvars[unknown_idxs]
     unknowns = [unknowns; extra_unknowns]
+    # `generate_system_equations!` will include the extra unknowns in `var_ordering` due to
+    # the `setdiff` at the end. Excluding them leads to issues when running `singularity_check`
+    # on the simplified `state` in `InitializationProblem`. However, `ispresent` can filter
+    # some of them out of `unknown_idxs` if they don't occur in the selected equations. As
+    # a result, we still add them here. `unique!` serves to remove duplicates. Otherwise,
+    # `tearing_hacks` may count an array variable occuring `length + 1` times in
+    # unknowns+observables, and will thus not add the `x ~ [x[1], x[2]...]` array hack
+    # observed equation.
+    unique!(unknowns)
     if StateSelection.is_only_discrete(structure)
         # Algebraic variables are shifted forward by one, so we backshift them.
         _unknowns = SymbolicT[]

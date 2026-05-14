@@ -220,3 +220,12 @@ end
     @test length(equations(ts)) == 1
     @test length(ts.fullvars) == 2
 end
+
+@testset "Unknowns in underdetermined systems aren't counted twice" begin
+    @variables x[1:3]
+    @mtkcompile sys = System([x[1] ~ 2x[2]+3x[3], x[2]^3 + x[3]^3 - 9 ~ 0], [x[1], x[2], x[3]], []) fully_determined=false
+    # Without the fix in https://github.com/JuliaComputing/StateSelection.jl/pull/80
+    # `unknowns` prior to running `tearing_hacks` will contain `x[3]` twice, so
+    # the observed equation `x ~ [x[1], x[2], x[3]]` won't be added.
+    @test isequal(observables(sys)[2], x)
+end
