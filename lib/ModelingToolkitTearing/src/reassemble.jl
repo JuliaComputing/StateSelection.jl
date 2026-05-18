@@ -702,6 +702,19 @@ function get_sorted_scc(
                setdiff(scc_eqs, scc_solved_eqs)]
     # the variables of the SCC are obtained by inverse mapping the sorted equations
     # and appending the rest
+    # Drop equations whose matched variable in `eq_var_matching` (= inverse of the regular
+    # var↔eq matching) is an Int but is outside this SCC. Such an entry indicates that
+    # the SCC pulled in an equation through `full_var_eq_matching[v]` for some `v ∈ scc`
+    # whose forward-matched eq is also matched to a different variable elsewhere
+    # (e.g. via stale dummy-derivative bookkeeping). Including such an eq in this SCC's
+    # eq list lets `generate_system_equations!` push the same state-variable index into
+    # `var_ordering` from two different SCCs, which trips the dup assertion at
+    # `reassemble.jl:499` ("Tearing internal error: lowering DAE into semi-implicit ODE failed!").
+    scc_set = Set(scc)
+    filter!(e -> begin
+        v = eq_var_matching[e]
+        !(v isa Int) || v in scc_set
+    end, scc_eqs)
     scc_vars = Int[]
     for e in scc_eqs
         v = eq_var_matching[e]
