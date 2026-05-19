@@ -119,9 +119,10 @@ function MTKBase.unhack_system(sys::System)
         A, b = @match linsolve begin
             BSImpl.Term(; args) => args
         end
-        A = collect(A)::Matrix{SymbolicT}
-        b = collect(b)::Vector{SymbolicT}
-        x = Vector{SymbolicT}(undef, length(b))
+        A_mat = collect(A)::Matrix{SymbolicT}
+        b_vec = collect(b)::Vector{SymbolicT}
+        N = length(b_vec)
+        x = Vector{SymbolicT}(undef, N)
         for (i, idx) in enumerate(idxs)
             is_obs = idx > 0
             idx = abs(idx)
@@ -140,14 +141,20 @@ function MTKBase.unhack_system(sys::System)
             additional_subs[linsolve[i]] = x[i]
         end
 
-        resid = A * x - b
-        for res in resid
-            SU._iszero(res) && continue
+        # Compute A*x - b element-wise, skipping zero entries
+        for i in 1:N
+            res_i = -b_vec[i]
+            for j in 1:N
+                aij = A_mat[i, j]
+                SU._iszero(aij) && continue
+                res_i += aij * x[j]
+            end
+            SU._iszero(res_i) && continue
             # If a linear SCC contains both `D(w)` and `w_t`, it'll contain the equation `D(w) ~ w_t`.
             # When unhacking it, `D(w)` will be totermed into `w_t`. Avoid adding the `0 ~ 0` equations.
             # The duplicate variables are automatically removed by the `Set`.
             # See https://github.com/SciML/ModelingToolkit.jl/issues/4196 for further details.
-            push!(additional_eqs, Symbolics.COMMON_ZERO ~ res)
+            push!(additional_eqs, Symbolics.COMMON_ZERO ~ res_i)
         end
     end
     @assert length(additional_eqs) == length(additional_vars)
