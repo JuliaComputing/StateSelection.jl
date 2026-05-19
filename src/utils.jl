@@ -259,7 +259,7 @@ end
 function add_row_coeffs!(
         row_col_i::Vector{Int}, row_val_i::Vector{T}, old_to_new_var::Vector{Int},
         aliases::Dict{Int, Int}, old_var::Int, coeff::T
-    ) where {T <: Integer}
+    ) where {T}
     alias = get(aliases, old_var, 0)
     iszero(alias) && return
     push!(row_col_i, old_to_new_var[alias])
@@ -270,13 +270,10 @@ end
 function add_row_coeffs!(
         row_col_i::Vector{Int}, row_val_i::Vector{T}, old_to_new_var::Vector{Int},
         aliases::Dict{Int, SparseArrays.SparseVector{T, Int}}, old_var::Int, coeff::T
-    ) where {T <: Integer}
+    ) where {T}
     alias = get(aliases, old_var, nothing)
     if alias isa SparseArrays.SparseVector{T, Int}
         I, V = SparseArrays.findnz(alias)
-        for (i, v) in zip(I, V)
-            iszero(old_to_new_var[i])
-        end
         append!(row_col_i, Iterators.map(Base.Fix1(getindex, old_to_new_var), I))
         append!(row_val_i, Iterators.map(Base.Fix1(*, coeff), V))
     end
