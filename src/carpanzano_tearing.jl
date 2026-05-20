@@ -55,6 +55,8 @@ function (alg::CarpanzanoTearing)(structure::SystemStructure)
     active_vars = OrderedSet{Int}()
     active_eqs = OrderedSet{Int}()
     for vars in var_sccs
+        empty!(active_vars)
+        empty!(active_eqs)
         for var in vars
             # Identify variables and equations in this SCC
             if varfilter(var)
