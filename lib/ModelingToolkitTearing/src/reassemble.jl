@@ -556,7 +556,7 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
                                analytical_linear_scc_limit::Int,
                                simplify::Bool; allow_symbolic::Bool = false,
                                allow_parameter::Bool = true)
-    (; fullvars) = state
+    (; fullvars, sys) = state
     # If the SCC is fully torn, don't bother generating a linsolve
     all_torn = true
     for iv in alg_vars
@@ -587,7 +587,7 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
     end
 
     for (varidx, var) in enumerate(vars)
-        lex = Symbolics.LinearExpander(var; strict = true)
+        lex = MTKBase.get_linear_expander_for!(sys, var, true)
         for (eqidx, resid) in enumerate(b)
             p, q, islinear = lex(resid)
             islinear || return nothing

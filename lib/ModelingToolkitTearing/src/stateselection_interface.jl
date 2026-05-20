@@ -230,7 +230,7 @@ function StateSelection.find_eq_solvables!(state::TearingState, ieq, to_rm = Int
         conservative = false,
         symbolically_rm_singular = true,
         kwargs...)
-    (; fullvars) = state
+    (; fullvars, sys) = state
     (; graph, solvable_graph) = state.structure
 
     eq = equations(state)[ieq]
@@ -249,7 +249,7 @@ function StateSelection.find_eq_solvables!(state::TearingState, ieq, to_rm = Int
     for j in 𝑠neighbors(graph, ieq)
         var = fullvars[j]
         MTKBase.isirreducible(var) && (all_int_vars = false; continue)
-        a, b, islinear = Symbolics.LinearExpander(var; strict = true)(term)
+        a, b, islinear = MTKBase.get_linear_expander_for!(sys, var, true)(term)
         islinear || (all_int_vars = false; continue)
         if !SU.isconst(a)
             all_int_vars = false
@@ -291,7 +291,7 @@ function StateSelection.find_eq_solvables!(state::TearingState, ieq, to_rm = Int
         rem_edge!(graph, ieq, j)
         symbolically_rm_singular || continue
         eq = equations(state)[ieq]
-        a, b, islin = Symbolics.LinearExpander(fullvars[j]; strict = true)(eq.rhs)
+        a, b, islin = MTKBase.get_linear_expander_for!(sys, fullvars[j], true)(eq.rhs)
         SU._iszero(a) && islin || continue
         equations(state)[ieq] = eq.lhs ~ b
     end
