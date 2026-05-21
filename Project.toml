@@ -22,7 +22,7 @@ StateSelectionDeepDiffsExt = "DeepDiffs"
 [compat]
 BipartiteGraphs = "0.1.2"
 DocStringExtensions = "0.9.3"
-FindFirstFunctions = "1.2.0"
+FindFirstFunctions = "1.2.0, 2"
 Graphs = "1.10.0"
 LinearAlgebra = "1.10.0"
 OrderedCollections = "1"
