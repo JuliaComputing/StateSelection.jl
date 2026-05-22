@@ -659,6 +659,7 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
     A, b, eqs_mask, vars_mask = __reduce_linear_system!(A, b, var_eq_matching, alg_eqs, alg_vars)
 
     N = length(b)
+    clil_A = A
     A = collect(A)::Matrix{Num}
 
     if N <= analytical_linear_scc_limit && _check_allow_symbolic_parameter(
@@ -704,33 +705,8 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
     else
         reference = fullvars[state_idx]
     end
-    # Use the `ArrayMaker` form for `A` and `b`
-    A_regions = SU.RegionsT()
-    A_values = Symbolics.SArgsT()
-    b_regions = SU.RegionsT()
-    b_values = Symbolics.SArgsT()
-    # fill the entire thing with zeros
-    push!(A_regions, SU.ShapeVecT((1:N, 1:N)))
-    push!(A_values, SU.Fill(A_regions[1])(Symbolics.COMMON_ZERO))
-    push!(b_regions, SU.ShapeVecT((1:N,)))
-    push!(b_values, SU.Fill(b_regions[1])(Symbolics.COMMON_ZERO))
 
-    for i in axes(A, 1), j in axes(A, 2)
-        coeff = unwrap(A[i, j])
-        SU._iszero(coeff) && continue
-        push!(A_regions, SU.ShapeVecT((i:i, j:j)))
-        push!(A_values, Symbolics.SConst([coeff;;]))
-    end
-
-    for (i, resid) in enumerate(b)
-        SU._iszero(resid) && continue
-        push!(b_regions, SU.ShapeVecT((i:i,)))
-        push!(b_values, Symbolics.SConst([resid]))
-    end
-
-    A = SU.ArrayMaker{VartypeT}(A_regions, A_values; shape = SU.ShapeVecT((1:N, 1:N)))
-    b = SU.ArrayMaker{VartypeT}(b_regions, b_values; shape = SU.ShapeVecT((1:N,)))
-
+    # Reference for `DiffCache`
     reference_args = Symbolics.SArgsT((reference, MTKBase.get_iv(sys)::SymbolicT))
     inps = MTKBase.inputs(sys)
     if !isempty(inps)
@@ -740,9 +716,78 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
         promote, reference_args;
         type = Vector{Real}, shape = [1:length(reference_args)]
     )[1]
-    sys, A_cache = MTKBase.add_diffcache(sys, N * N)
-    A_allocator = A_cache(reference)
-    A = SU.Code.with_allocator(A_allocator, SU.Const{VartypeT}(A))
+
+    A_sparsity = min(round(Int, 100 * count(SU._iszero ∘ unwrap, A) / length(A)), 99)
+    use_sparse_A = (A_sparsity == 97 && 80 <= N <= 120) ||
+        (A_sparsity == 98 && 150 <= N <= 250) || (A_sparsity == 99 && N >= 100)
+    if use_sparse_A
+        I = Int[]
+        J = Int[]
+        V = SymbolicT[]
+        nnz = sum(length, clil_A.row_cols)
+        sizehint!(I, nnz)
+        sizehint!(J, nnz)
+        sizehint!(V, nnz)
+        for i in eachindex(clil_A.row_cols)
+            rcol = clil_A.row_cols[i]
+            rval = clil_A.row_vals[i]
+            for (j, val) in zip(rcol, rval)
+                push!(I, i)
+                push!(J, j)
+                push!(V, unwrap(val))
+            end
+        end
+        spA = SparseArrays.sparse(I, J, V, N, N)
+        dump_linear_scc_to_file("large_scc_$(length(I)).jl", spA, vars[vars_mask])
+        sys, A_cache = MTKBase.add_diffcache(sys, length(spA.nzval))
+        sys, I_param = MTKBase.add_misc_parameter(sys, Int, 1:length(spA.colptr))
+        sys, J_param = MTKBase.add_misc_parameter(sys, Int, 1:length(spA.rowval))
+        ics = copy(MTKBase.get_initial_conditions(sys))
+        ics[I_param] = spA.colptr
+        ics[J_param] = spA.rowval
+        @set! sys.initial_conditions = ics
+        A_allocator = A_cache(reference)
+        nzval = SU.Code.with_allocator(A_allocator, Symbolics.SConst(spA.nzval))
+        A = Symbolics.STerm(
+            SparseArrays.SparseMatrixCSC,
+            Symbolics.SArgsT((spA.m, spA.n, I_param, J_param, nzval));
+            type = SparseArrays.SparseMatrixCSC{Real, Int}, shape = SU.ShapeVecT((1:N, 1:N))
+        )
+    else
+        # Use the `ArrayMaker` form for `A`
+        A_regions = SU.RegionsT()
+        A_values = Symbolics.SArgsT()
+        # fill the entire thing with zeros
+        push!(A_regions, SU.ShapeVecT((1:N, 1:N)))
+        push!(A_values, SU.Fill(A_regions[1])(Symbolics.COMMON_ZERO))
+
+        for i in axes(A, 1), j in axes(A, 2)
+            coeff = unwrap(A[i, j])
+            SU._iszero(coeff) && continue
+            push!(A_regions, SU.ShapeVecT((i:i, j:j)))
+            push!(A_values, Symbolics.SConst([coeff;;]))
+        end
+
+        A = SU.ArrayMaker{VartypeT}(
+            A_regions, A_values;
+            shape = SU.ShapeVecT((1:N, 1:N))
+        )
+        sys, A_cache = MTKBase.add_diffcache(sys, N * N)
+        A_allocator = A_cache(reference)
+        A = SU.Code.with_allocator(A_allocator, SU.Const{VartypeT}(A))
+    end
+
+    b_regions = SU.RegionsT()
+    b_values = Symbolics.SArgsT()
+    push!(b_regions, SU.ShapeVecT((1:N,)))
+    push!(b_values, SU.Fill(b_regions[1])(Symbolics.COMMON_ZERO))
+    for (i, resid) in enumerate(b)
+        SU._iszero(resid) && continue
+        push!(b_regions, SU.ShapeVecT((i:i,)))
+        push!(b_values, Symbolics.SConst([resid]))
+    end
+    b = SU.ArrayMaker{VartypeT}(b_regions, b_values; shape = SU.ShapeVecT((1:N,)))
+
     sys, b_cache = MTKBase.add_diffcache(sys, N)
     b_allocator = b_cache(reference)
     b = SU.Code.with_allocator(b_allocator, SU.Const{VartypeT}(b))

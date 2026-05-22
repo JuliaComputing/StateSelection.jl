@@ -118,11 +118,22 @@ function MTKBase.unhack_system(sys::System)
     if sched isa MTKBase.Schedule
         sched = copy(sched)
     end
+    ics = MTKBase.get_initial_conditions(sys)
     for (linsolve, idxs) in inline_linear_scc_map
         A, b = @match linsolve begin
             BSImpl.Term(; args) => args
         end
-        A_mat = collect(A)::Matrix{SymbolicT}
+        A_mat = @match A begin
+            BSImpl.Term(; f, args) => if f === SU.Code.with_allocator
+                collect(A)::Matrix{SymbolicT}
+            elseif f === SparseArrays.SparseMatrixCSC
+                colptr = unwrap_const(ics[args[3]])::Vector{Int}
+                rowval = unwrap_const(ics[args[4]])::Vector{Int}
+                collect(SparseArrays.SparseMatrixCSC(unwrap_const(args[1])::Int, unwrap_const(args[2])::Int, colptr, rowval, collect(args[5])::Vector{SymbolicT}))::Matrix{SymbolicT}
+            else
+                @assert false
+            end
+        end
         b_vec = collect(b)::Vector{SymbolicT}
         N = length(b_vec)
         x = Vector{SymbolicT}(undef, N)
