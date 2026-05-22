@@ -33,9 +33,52 @@ $TYPEDFIELDS
     eqfilter::F3 = (_ -> true)
 end
 
+"""
+    $TYPEDSIGNATURES
+
+In `full_var_eq_matching`, for a fully determined system, we expect every valid variable
+to be matched to a valid equation. `var_eq_matching` will have some  `unassigned`. Update
+`full_var_eq_matching` to match `var_eq_matching`, and fill in the `unassigned` as best as
+possible.
+"""
+function update_full_var_eq_matching!(
+        graph, full_var_eq_matching, var_eq_matching, vars::Vector{Int},
+        eqs::OrderedSet{Int}; varfilter
+    )
+    # In `full_var_eq_matching`, for a fully determined system, we expect every valid
+    # variable to be matched to a valid equation. `var_eq_matching` will have some 
+    # `unassigned`. Update `full_var_eq_matching` to match `var_eq_matching`, and
+    # fill in the `unassigned` as best as possible.
+    for var in vars
+        if varfilter(var)
+            eq = full_var_eq_matching[var] = var_eq_matching[var]
+            eq isa Int && delete!(eqs, eq)
+        end
+    end
+
+    for var in vars
+        isempty(eqs) && break
+        varfilter(var) || continue
+        _eq = full_var_eq_matching[var]
+        _eq isa Int && continue
+        found = false
+        for eq in eqs
+            Graphs.has_edge(graph, BipartiteGraphs.BipartiteEdge(eq, var)) || continue
+            found = true
+            full_var_eq_matching[var] = eq
+            delete!(eqs, eq)
+            break
+        end
+        found && continue
+        eq = full_var_eq_matching[var] = first(eqs)
+        delete!(eqs, eq)
+    end
+end
+
 function (alg::CarpanzanoTearing)(structure::SystemStructure)
     (; isder, varfilter, eqfilter) = alg
     (; graph, solvable_graph) = structure
+
     var_eq_matching = maximal_matching(
         graph, Unassigned;
         srcfilter = eqfilter,
@@ -54,9 +97,11 @@ function (alg::CarpanzanoTearing)(structure::SystemStructure)
 
     active_vars = OrderedSet{Int}()
     active_eqs = OrderedSet{Int}()
+    remaining_eqs = OrderedSet{Int}()
     for vars in var_sccs
         empty!(active_vars)
         empty!(active_eqs)
+        empty!(remaining_eqs)
         for var in vars
             # Identify variables and equations in this SCC
             if varfilter(var)
@@ -65,12 +110,14 @@ function (alg::CarpanzanoTearing)(structure::SystemStructure)
                 # pass the filter.
                 if var_eq_matching[var] isa Int
                     push!(active_eqs, var_eq_matching[var])
+                    push!(remaining_eqs, var_eq_matching[var])
                 end
             end
             # Tearing will now determine the matching
             var_eq_matching[var] = unassigned
         end
         carpanzano_tear_scc!(alg, structure, var_eq_matching, active_vars, active_eqs)
+        update_full_var_eq_matching!(graph, full_var_eq_matching, var_eq_matching, vars, remaining_eqs; varfilter)
     end
 
     return TearingResult(var_eq_matching, full_var_eq_matching, var_sccs), (;)
