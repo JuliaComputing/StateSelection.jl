@@ -556,7 +556,9 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
                                analytical_linear_scc_limit::Int,
                                simplify::Bool; allow_symbolic::Bool = false,
                                allow_parameter::Bool = true)
-    (; fullvars, sys) = state
+    (; fullvars, sys, structure) = state
+    (; graph) = structure
+
     # If the SCC is fully torn, don't bother generating a linsolve
     all_torn = true
     for iv in alg_vars
@@ -589,6 +591,7 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
     for (varidx, var) in enumerate(vars)
         lex = MTKBase.get_linear_expander_for!(sys, var, true)
         for (eqidx, resid) in enumerate(b)
+            Graphs.has_edge(graph, BipartiteEdge(alg_eqs[eqidx], alg_vars[varidx])) || continue
             p, q, islinear = lex(resid)
             islinear || return nothing
             if !SU._iszero(p)
