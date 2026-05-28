@@ -76,8 +76,15 @@ function StateSelection.linear_subsys_adjmat!(state::TearingState; kwargs...)
     cadj = Vector{Int}[]
     coeffs = Int[]
     to_rm = Int[]
+    fullvars_set = Set{SymbolicT}(state.fullvars)
+    for v in state.fullvars
+        @match v begin
+            BSImpl.Term(; f, args) && if f === getindex end => push!(fullvars_set, args[1])
+            _ => nothing
+        end
+    end
     for i in eachindex(eqs)
-        all_int_vars, rhs = StateSelection.find_eq_solvables!(state, i, to_rm, coeffs; kwargs...)
+        all_int_vars, rhs = StateSelection.find_eq_solvables!(state, i, to_rm, coeffs; fullvars_set, kwargs...)
 
         # Check if all unknowns in the equation is both linear and homogeneous,
         # i.e. it is in the form of
@@ -229,6 +236,7 @@ function StateSelection.find_eq_solvables!(state::TearingState, ieq, to_rm = Int
         allow_symbolic = false, allow_parameter = true,
         conservative = false,
         symbolically_rm_singular = true,
+        fullvars_set::Union{Set{SymbolicT}, Nothing} = nothing,
         kwargs...)
     (; fullvars, sys) = state
     (; graph, solvable_graph) = state.structure
@@ -239,11 +247,13 @@ function StateSelection.find_eq_solvables!(state::TearingState, ieq, to_rm = Int
     coeffs === nothing || empty!(coeffs)
     empty!(to_rm)
 
-    fullvars_set = Set{SymbolicT}(fullvars)
-    for v in fullvars
-        @match v begin
-            BSImpl.Term(; f, args) && if f === getindex end => push!(fullvars_set, args[1])
-            _ => nothing
+    if fullvars_set === nothing
+        fullvars_set = Set{SymbolicT}(fullvars)
+        for v in fullvars
+            @match v begin
+                BSImpl.Term(; f, args) && if f === getindex end => push!(fullvars_set, args[1])
+                _ => nothing
+            end
         end
     end
     for j in 𝑠neighbors(graph, ieq)
