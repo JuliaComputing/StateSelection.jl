@@ -8,6 +8,7 @@ using Graphs
 import StateSelection
 using ModelingToolkit: t_nounits as t, D_nounits as D
 import SymbolicUtils as SU
+using SymbolicUtils: unwrap
 using Setfield
 using ForwardDiff
 
@@ -228,4 +229,67 @@ end
     # `unknowns` prior to running `tearing_hacks` will contain `x[3]` twice, so
     # the observed equation `x ~ [x[1], x[2], x[3]]` won't be added.
     @test isequal(observables(sys)[2], x)
+end
+
+const InferredDiscrete = MTKTearing.InferredClock.InferredDiscrete
+
+struct Op1 <: Symbolics.Operator end
+Op1(x, y) = Op1()(unwrap(x), unwrap(y))
+(o::Op1)(x, y) = Symbolics.STerm(o, [x, y]; type = SU.symtype(x), shape = SU.shape(x))
+SU.promote_symtype(::Op1, T::SU.TypeT, T2::SU.TypeT) = T
+SU.promote_shape(::Op1, @nospecialize(sh::SU.ShapeT), @nospecialize(sh2::SU.ShapeT)) = sh
+MTKTearing.input_timedomain(::Op1, _) = MTKTearing.InputTimeDomainElT[InferredDiscrete(1), InferredDiscrete(2)]
+MTKTearing.output_timedomain(::Op1, _) = InferredDiscrete(2)
+MTKTearing.is_transparent_operator(::Op1) = true
+MTKTearing.is_timevarying_operator(::Op1) = true
+
+struct Op2 <: Symbolics.Operator end
+Op2(x, y) = Op2()(unwrap(x), unwrap(y))
+(o::Op2)(x, y) = Symbolics.STerm(o, [x, y]; type = SU.symtype(x), shape = SU.shape(x))
+SU.promote_symtype(::Op2, T::SU.TypeT, T2::SU.TypeT) = T
+SU.promote_shape(::Op2, @nospecialize(sh::SU.ShapeT), @nospecialize(sh2::SU.ShapeT)) = sh
+MTKTearing.input_timedomain(::Op2, _) = MTKTearing.InputTimeDomainElT[InferredDiscrete(1), InferredDiscrete(1)]
+MTKTearing.output_timedomain(::Op2, _) = InferredDiscrete(2)
+MTKTearing.is_transparent_operator(::Op2) = true
+MTKTearing.is_timevarying_operator(::Op2) = true
+
+struct Op3 <: Symbolics.Operator end
+Op3(x) = Op3()(unwrap(x))
+(o::Op3)(x::Symbolics.SymbolicT) = Symbolics.STerm(o, [x]; type = SU.symtype(x), shape = SU.shape(x))
+SU.promote_symtype(::Op3, T::SU.TypeT) = T
+SU.promote_shape(::Op3, @nospecialize(sh::SU.ShapeT)) = sh
+MTKTearing.input_timedomain(::Op3, _) = MTKTearing.InputTimeDomainElT[InferredDiscrete(1)]
+MTKTearing.output_timedomain(::Op3, _) = InferredDiscrete(1)
+MTKTearing.is_transparent_operator(::Op3) = true
+MTKTearing.is_timevarying_operator(::Op3) = true
+
+@testset "Clock inference handles nested clock operators correctly" begin
+    @variables x(t) y(t) z(t) w(t)
+    k1 = ShiftIndex(Clock(0.1))
+    k2 = ShiftIndex(Clock(0.2))
+
+    # From `Op1`, we should infer that `clock_of(z) == clock_of(y)`
+    # From `Op2`, we should infer that `clock_of(w) == clock_of(Op3(x))`
+    # from `Op3`, we should infer that `clock_of(x) == clock_of(Op3(x))`
+    # The `+ x` in `Op1` is just so that `Op2(..)` has a defined clock
+    eqs = [
+        z(k1) ~ Op1(Op2(Op3(x), w) + x, 3sin(y))
+        x ~ x(k2-1) + 1
+    ]
+    @named sys = System(eqs, t, [x, y, z, w], [])
+    ts = TearingState(sys)
+    @test issetequal(ts.fullvars, [x, x(k2-1), y, z, w, Op3(x), Op2(Op3(x), w), Op1(Op2(Op3(x), w) + x, 3sin(y))])
+    ci = MTKTearing.ClockInference(ts)
+    MTKTearing.infer_clocks!(ci)
+
+    # Check that this errors if `+ x` is not present.
+    eqs = [
+        z(k1) ~ Op1(Op2(Op3(x), w), 3sin(y))
+        x ~ x(k2-1) + 1
+    ]
+    @named sys = System(eqs, t, [x, y, z, w], [])
+    ts = TearingState(sys)
+    @test issetequal(ts.fullvars, [x, x(k2-1), y, z, w, Op3(x), Op2(Op3(x), w), Op1(Op2(Op3(x), w), 3sin(y))])
+    ci = MTKTearing.ClockInference(ts)
+    @test_throws MTKTearing.ExpectedDiscreteClockPartitionError MTKTearing.infer_clocks!(ci)
 end

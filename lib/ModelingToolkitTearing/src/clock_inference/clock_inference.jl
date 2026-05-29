@@ -81,7 +81,7 @@ struct NotInferredTimeDomain end
 struct InferEquationClosure
     varsbuf::OrderedSet{SymbolicT}
     # variables in each argument to an operator
-    arg_varsbuf::Set{SymbolicT}
+    arg_varsbuf::OrderedSet{SymbolicT}
     # hyperedge for each equation
     hyperedge::Set{ClockVertex.Type}
     # hyperedge for each argument to an operator
@@ -95,14 +95,235 @@ struct InferEquationClosure
 end
 
 function InferEquationClosure(var_to_idx, inference_graph)
-    InferEquationClosure(OrderedSet{SymbolicT}(), Set{SymbolicT}(), Set{ClockVertex.Type}(),
+    InferEquationClosure(OrderedSet{SymbolicT}(), OrderedSet{SymbolicT}(), Set{ClockVertex.Type}(),
                          Set{ClockVertex.Type}(), Dict{Int, Set{ClockVertex.Type}}(),
                          Set{ClockVertex.Type}(), var_to_idx, inference_graph)
 end
 
+struct InferVariableClosure
+    # The hyperedge that this variable exists in. Could be the hyperedge for an equation,
+    # or one for the argument of a clock operator. The parent is responsible for
+    # adding this hyperedge to the inference graph.
+    parent_hyperedge::Set{ClockVertex.Type}
+    # The list of variables to be explored in the parent. This allows
+    # the variable to queue up additional variables to be searched
+    # in the same context.
+    vars_in_parent::OrderedSet{SymbolicT}
+    # Mapping from `i` in `InferredDiscrete(i)` to the vertices in that inferred partition.
+    relative_hyperedges::Dict{Int, Set{ClockVertex.Type}}
+    # Variables in each argument to an operator.
+    arg_varsbuf::OrderedSet{SymbolicT}
+    # Hyperedge for each argument to an operator. This closure is responsible for
+    # adding this hyperedge to the inference graph.
+    arg_hyperedge::Set{ClockVertex.Type}
+    var_to_idx::Dict{SymbolicT, Int}
+    must_be_discrete::Set{ClockVertex.Type}
+    inference_graph::HyperGraph{ClockVertex.Type}
+end
+
+# When searching a variable/operator application present directly in an equation
+function InferVariableClosure(iec::InferEquationClosure)
+    return InferVariableClosure(
+        # This exists in the equation's hyperedge.
+        iec.hyperedge,
+        # Use the equation's queue for variables to explore.
+        iec.varsbuf,
+        # The next three are basically just preallocated buffers. Theoretically,
+        # these could be omitted from both structs. However, it's very common to
+        # have at least one clock operator in an expression, and unlikely to nest.
+        # So this allows saving unnecessary allocations in each call to the
+        # `InferVariableClosure`. It also allows the
+        # `InferVariableClosure(::InferVariableClosure)` constructor to be simpler.
+        iec.relative_hyperedges,
+        iec.arg_varsbuf,
+        iec.arg_hyperedge,
+        # Shared information propagated across the hierarchy.
+        iec.var_to_idx,
+        iec.must_be_discrete,
+        iec.inference_graph,
+    )
+end
+
+# When searching a variable/operator application present in the argument of
+# a clock operator. The returned `InferVariableClosure` will be called recursively
+# from the `ivc` passed in.
+function InferVariableClosure(ivc::InferVariableClosure)
+    return InferVariableClosure(
+        # This exists in the clock operator argument's hyperedge.
+        ivc.arg_hyperedge,
+        # Use the operator argument's queue.
+        ivc.arg_varsbuf,
+        # Cannot reuse buffers, allocate new ones.
+        Dict{Int, Set{ClockVertex.Type}}(),
+        OrderedSet{SymbolicT}(),
+        Set{ClockVertex.Type}(),
+        # Same shared information.
+        ivc.var_to_idx,
+        ivc.must_be_discrete,
+        ivc.inference_graph,
+    )
+end
+
+function (ivc::InferVariableClosure)(var::SymbolicT)
+    # NOTE: Never add `hyperedge` to the graph. The parent is responsible for doing so.
+    (; var_to_idx, parent_hyperedge, vars_in_parent, relative_hyperedges) = ivc
+    (; arg_varsbuf, arg_hyperedge, must_be_discrete, inference_graph) = ivc
+    hyperedge = parent_hyperedge
+
+    idx = get(var_to_idx, var, nothing)
+    # if this is just a single variable, add it to the hyperedge
+    if idx isa Int
+        push!(hyperedge, ClockVertex.Variable(idx))
+        d = get_time_domain(var)
+        if is_concrete_time_domain(d)
+            push!(hyperedge, ClockVertex.Clock(d))
+        elseif d isa InferredTimeDomain
+            @match d begin
+                InferredClock.Inferred(id) => push!(hyperedge, ClockVertex.InferredClock(id))
+                _ => nothing
+            end
+        elseif d isa MTKBase.IntegerSequence
+            push!(hyperedge, ClockVertex.IntegerSequence())
+        end
+
+        # we don't immediately `return` here because this variable might be a
+        # `Sample` or similar and we want the clock information from it if it is.
+    end
+
+    # Leverage concrete clock information about this variable/operator application
+    d = get_time_domain(var)
+    if d === nothing
+        arrv, isarr = MTKBase.split_indexed_var(var)
+        d = get_time_domain(arrv)
+    end
+    if is_concrete_time_domain(d)::Bool
+        push!(hyperedge, ClockVertex.Clock(d))
+    elseif d isa InferredTimeDomain
+        @match d begin
+            InferredClock.Inferred(id) => push!(hyperedge, ClockVertex.InferredClock(id))
+            _ => nothing
+        end
+    elseif d isa MTKBase.IntegerSequence
+        push!(hyperedge, ClockVertex.IntegerSequence())
+    end
+
+    @match var begin
+        # `Shift` sets the clock metadata of its input, so use that
+        BSImpl.Term(; f, args) && if f isa Shift end => begin
+            d = get_time_domain(args[1])
+            if is_concrete_time_domain(d)::Bool
+                push!(hyperedge, ClockVertex.Clock(d))
+            elseif d isa InferredTimeDomain
+                @match d begin
+                    InferredClock.Inferred(id) => push!(hyperedge, ClockVertex.InferredClock(id))
+                    _ => nothing
+                end
+            elseif d isa MTKBase.IntegerSequence
+                push!(hyperedge, ClockVertex.IntegerSequence())
+            end
+        end
+        _ => nothing
+    end
+
+    # now we only care about synchronous operators
+    op, args = @match var begin
+        BSImpl.Term(; f, args) && if is_timevarying_operator(f)::Bool end => (f, args)
+        # If we have a symbolic array variable, process each of its elements
+        if SU.is_array_shape(SU.shape(var)) end => begin
+            for i in SU.stable_eachindex(var)
+                push!(vars_in_parent, var[i])
+            end
+            return
+        end
+        _ => return
+    end
+
+    # arguments and corresponding time domains
+    tdomains = input_timedomain(op, args)::Vector{InputTimeDomainElT}
+    nargs = length(args)
+    ndoms = length(tdomains)
+    if nargs != ndoms
+        throw(ArgumentError("""
+                            Operator $op applied to $nargs arguments $args but only returns $ndoms \
+                            domains $tdomains from `input_timedomain`.
+                            """))
+    end
+
+    nested_ivc = InferVariableClosure(ivc)
+    # each relative clock mapping is only valid per operator application
+    empty!(relative_hyperedges)
+    for (arg, domain) in zip(args, tdomains)
+        empty!(arg_varsbuf)
+        empty!(arg_hyperedge)
+        # get variables in argument
+        SU.search_variables!(arg_varsbuf, arg)
+        # get hyperedge for involved variables
+        for v in arg_varsbuf
+            nested_ivc(v)
+        end
+
+        # NOTE: Ensure all branches here add `arg_hyperedge` to the inference graph. It
+        # is the parent hyperedge for `nested_ivc`, so this closure is responsible for
+        # adding it to the graph.
+        @match domain begin
+            # If the time domain for this argument is a clock, then all variables in this edge have that clock.
+            x::SciMLBase.AbstractClock => begin
+                # add the clock to the edge
+                push!(arg_hyperedge, ClockVertex.Clock(x))
+                # add the edge to the graph
+                add_edge!(inference_graph, arg_hyperedge)
+            end
+            x::MTKBase.IntegerSequence => begin
+                push!(arg_hyperedge, ClockVertex.IntegerSequence())
+                add_edge!(inference_graph, arg_hyperedge)
+            end
+            # We only know that this time domain is inferred. Treat it as a unique domain, all we know is that the
+            # involved variables have the same clock.
+            InferredClock.Inferred() => add_edge!(inference_graph, arg_hyperedge)
+            # All `InferredDiscrete` with the same `i` have the same clock (including output domain) so we don't
+            # add the edge, and instead add this to the `relative_hyperedges` mapping.
+            InferredClock.InferredDiscrete(i) => begin
+                relative_edge = get!(Set{ClockVertex.Type}, relative_hyperedges, i)
+                union!(relative_edge, arg_hyperedge)
+                # Ensure that this clock partition will be discrete.
+                union!(must_be_discrete, arg_hyperedge)
+                add_edge!(inference_graph, arg_hyperedge)
+            end
+        end
+    end
+
+    # Handle the output timedomain of this clock operator application.
+    outdomain = output_timedomain(op, args)
+    if outdomain isa SciMLBase.AbstractClock
+        # If it is a clock we know, simply add it to the parent edge.
+        push!(hyperedge, ClockVertex.Clock(outdomain))
+    elseif outdomain isa InferredTimeDomain
+        @match outdomain begin
+            InferredClock.Inferred() => nothing
+            InferredClock.InferredDiscrete(i) => begin
+                # If we've encountered this relative inferreddiscrete index before,
+                # we know that that relative hyperedge is the output. So include it
+                # in the parent hyperedge.
+                buffer = get(relative_hyperedges, i, nothing)
+                if buffer !== nothing
+                    union!(hyperedge, buffer)
+                    delete!(relative_hyperedges, i)
+                end
+                # Everything here must be discrete.
+                union!(must_be_discrete, hyperedge)
+            end
+        end
+    else
+        error("Unreachable reached!")
+    end
+
+    for (_, relative_edge) in relative_hyperedges
+        add_edge!(inference_graph, relative_edge)
+    end
+end
+
 function (iec::InferEquationClosure)(ieq::Int, eq::Equation, is_initialization_equation::Bool)
-    (; varsbuf, arg_varsbuf, hyperedge, arg_hyperedge, relative_hyperedges) = iec
-    (; must_be_discrete, var_to_idx, inference_graph) = iec
+    (; varsbuf, hyperedge, inference_graph) = iec
     empty!(varsbuf)
     empty!(hyperedge)
     # get variables in equation
@@ -114,145 +335,9 @@ function (iec::InferEquationClosure)(ieq::Int, eq::Equation, is_initialization_e
         ClockVertex.Equation(ieq)
     end
     push!(hyperedge, eq_node)
+    ivc = InferVariableClosure(iec)
     for var in varsbuf
-        idx = get(var_to_idx, var, nothing)
-        # if this is just a single variable, add it to the hyperedge
-        if idx isa Int
-            push!(hyperedge, ClockVertex.Variable(idx))
-            d = get_time_domain(var)
-            if is_concrete_time_domain(d)
-                push!(hyperedge, ClockVertex.Clock(d))
-            elseif d isa InferredTimeDomain
-                @match d begin
-                    InferredClock.Inferred(id) => push!(hyperedge, ClockVertex.InferredClock(id))
-                    _ => nothing
-                end
-            elseif d isa MTKBase.IntegerSequence
-                push!(hyperedge, ClockVertex.IntegerSequence())
-            end
- 
-            # we don't immediately `continue` here because this variable might be a
-            # `Sample` or similar and we want the clock information from it if it is.
-        end
-        d = get_time_domain(var)
-        if d === nothing
-            arrv, isarr = MTKBase.split_indexed_var(var)
-            d = get_time_domain(arrv)
-        end
-        if is_concrete_time_domain(d)::Bool
-            push!(hyperedge, ClockVertex.Clock(d))
-        elseif d isa InferredTimeDomain
-            @match d begin
-                InferredClock.Inferred(id) => push!(hyperedge, ClockVertex.InferredClock(id))
-                _ => nothing
-            end
-        elseif d isa MTKBase.IntegerSequence
-            push!(hyperedge, ClockVertex.IntegerSequence())
-        end
-
-        @match var begin
-            BSImpl.Term(; f, args) && if f isa Shift end => begin
-                d = get_time_domain(args[1])
-                if is_concrete_time_domain(d)::Bool
-                    push!(hyperedge, ClockVertex.Clock(d))
-                elseif d isa InferredTimeDomain
-                    @match d begin
-                        InferredClock.Inferred(id) => push!(hyperedge, ClockVertex.InferredClock(id))
-                        _ => nothing
-                    end
-                elseif d isa MTKBase.IntegerSequence
-                    push!(hyperedge, ClockVertex.IntegerSequence())
-                end
-            end
-            _ => nothing
-        end
-
-        # now we only care about synchronous operators
-        op, args = @match var begin
-            BSImpl.Term(; f, args) && if is_timevarying_operator(f)::Bool end => (f, args)
-            if SU.is_array_shape(SU.shape(var)) end => begin
-                for i in SU.stable_eachindex(var)
-                    push!(varsbuf, var[i])
-                end
-                continue
-            end
-            _ => continue
-        end
-
-        # arguments and corresponding time domains
-        tdomains = input_timedomain(op, args)::Vector{InputTimeDomainElT}
-        nargs = length(args)
-        ndoms = length(tdomains)
-        if nargs != ndoms
-            throw(ArgumentError("""
-            Operator $op applied to $nargs arguments $args but only returns $ndoms \
-            domains $tdomains from `input_timedomain`.
-            """))
-        end
-
-        # each relative clock mapping is only valid per operator application
-        empty!(relative_hyperedges)
-        for (arg, domain) in zip(args, tdomains)
-            empty!(arg_varsbuf)
-            empty!(arg_hyperedge)
-            # get variables in argument
-            SU.search_variables!(arg_varsbuf, arg; is_atomic = MTKBase.OperatorIsAtomic{Union{Differential, MTKBase.Shift}}())
-            # get hyperedge for involved variables
-            for v in arg_varsbuf
-                vidx = get(var_to_idx, v, nothing)
-                vidx === nothing && continue
-                push!(arg_hyperedge, ClockVertex.Variable(vidx))
-            end
-
-            @match domain begin
-                # If the time domain for this argument is a clock, then all variables in this edge have that clock.
-                x::SciMLBase.AbstractClock => begin
-                    # add the clock to the edge
-                    push!(arg_hyperedge, ClockVertex.Clock(x))
-                    # add the edge to the graph
-                    add_edge!(inference_graph, arg_hyperedge)
-                end
-                x::MTKBase.IntegerSequence => begin
-                    push!(arg_hyperedge, ClockVertex.IntegerSequence())
-                    add_edge!(inference_graph, arg_hyperedge)
-                end
-                # We only know that this time domain is inferred. Treat it as a unique domain, all we know is that the
-                # involved variables have the same clock.
-                InferredClock.Inferred() => add_edge!(inference_graph, arg_hyperedge)
-                # All `InferredDiscrete` with the same `i` have the same clock (including output domain) so we don't
-                # add the edge, and instead add this to the `relative_hyperedges` mapping.
-                InferredClock.InferredDiscrete(i) => begin
-                    relative_edge = get!(Set{ClockVertex.Type}, relative_hyperedges, i)
-                    union!(relative_edge, arg_hyperedge)
-                    # Ensure that this clock partition will be discrete.
-                    union!(must_be_discrete, arg_hyperedge)
-                    add_edge!(inference_graph, arg_hyperedge)
-                end
-            end
-        end
-
-        outdomain = output_timedomain(op, args)
-        if outdomain isa SciMLBase.AbstractClock
-            push!(hyperedge, ClockVertex.Clock(outdomain))
-        elseif outdomain isa InferredTimeDomain
-            @match outdomain begin
-                InferredClock.Inferred() => nothing
-                InferredClock.InferredDiscrete(i) => begin
-                    buffer = get(relative_hyperedges, i, nothing)
-                    if buffer !== nothing
-                        union!(hyperedge, buffer)
-                        delete!(relative_hyperedges, i)
-                    end
-                    union!(must_be_discrete, hyperedge)
-                end
-            end
-        else
-            error("Unreachable reached!")
-        end
-
-        for (_, relative_edge) in relative_hyperedges
-            add_edge!(inference_graph, relative_edge)
-        end
+        ivc(var)
     end
 
     add_edge!(inference_graph, hyperedge)
