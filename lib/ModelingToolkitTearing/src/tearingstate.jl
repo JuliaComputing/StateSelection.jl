@@ -173,7 +173,8 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
 
     # build symbolic incidence
     symbolic_incidence = Vector{SymbolicT}[]
-    varsbuf = Set{SymbolicT}()
+    varsbuf = OrderedSet{SymbolicT}()
+    auxiliary_vars = OrderedSet{SymbolicT}()
     eqs_to_retain = trues(length(eqs))
     for (i, eq) in enumerate(eqs)
         eq, is_statemachine_equation = canonicalize_eq!(param_derivative_map, no_deriv_params, eqs_to_retain, ps, iv, i, eq)
@@ -239,7 +240,7 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
                             for (i, td) in enumerate(it)
                                 v′ = args[i]
                                 SU.isconst(v′) && continue
-                                addvar!(setmetadata(v′, MTKBase.VariableTimeDomain, td), VARIABLE)
+                                SU.search_variables!(auxiliary_vars, v′; is_atomic = MTKBase.OperatorIsAtomic{SU.Operator}())
                             end
                     end
                     _ => nothing
@@ -278,6 +279,83 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
         push!(symbolic_incidence, collect(incidence))
     end
 
+    for v in auxiliary_vars
+        if v in ps
+            if iv isa SymbolicT && is_time_dependent_parameter(v, ps, iv) &&
+                !haskey(param_derivative_map, Differential(iv)(v)) && !(Differential(iv)(v) in no_deriv_params)
+                # Parameter derivatives default to zero - they stay constant
+                # between callbacks
+                param_derivative_map[Differential(iv)(v)] = Symbolics.COMMON_ZERO
+            end
+            continue
+        end
+
+        iv isa SymbolicT && isequal(v, iv) && continue
+        iv isa SymbolicT && MTKBase.isdelay(v, iv) && continue
+
+        if !in(v, dvs)
+            isvalid = @match v begin
+                BSImpl.Term(; f, args) => f isa Shift || isempty(args) || f isa SU.Operator && is_transparent_operator(f)::Bool
+                _ => false
+            end
+            v′ = v
+            while !isvalid
+                @match v′ begin
+                    BSImpl.Term(; f, args) => begin
+                        if f isa Differential
+                            v′ = args[1]
+                        elseif f isa Shift
+                            v′ = args[1]
+                        else
+                            break
+                        end
+                        if v′ in dvs
+                            isvalid = true
+                            break
+                        end
+                    end
+                    _ => break
+                end
+            end
+            if !isvalid
+                throw(ArgumentError("$v is present in the system but $v′ is not an unknown."))
+            end
+
+            addvar!(v, VARIABLE)
+            @match v begin
+                BSImpl.Term(; f, args) && if f isa SU.Operator &&
+                    !(f isa Differential)
+                end => begin
+                    it = input_timedomain(f, args)::Vector{InputTimeDomainElT}
+                    for (i, td) in enumerate(it)
+                        v′ = args[i]
+                        SU.isconst(v′) && continue
+                        SU.search_variables!(auxiliary_vars, v′; is_atomic = MTKBase.OperatorIsAtomic{SU.Operator}())
+                    end
+                end
+                _ => nothing
+            end
+        end
+        sh = SU.shape(v)::SU.ShapeVecT
+        if isempty(sh)
+            addvar!(v, VARIABLE)
+        elseif length(sh) == 1
+            vv = collect(v)::Vector{SymbolicT}
+            for vi in vv
+                addvar!(vi, VARIABLE)
+            end
+        elseif length(sh) == 2
+            vv = collect(v)::Matrix{SymbolicT}
+            for vi in vv
+                addvar!(vi, VARIABLE)
+            end
+        else
+            vv = vec(collect(v)::Array{SymbolicT})::Vector{SymbolicT}
+            for vi in vv
+                addvar!(vi, VARIABLE)
+            end
+        end
+    end
     filter!(Base.Fix2(!==, MTKBase.COMMON_NOTHING) ∘ last, param_derivative_map)
 
     eqs = eqs[eqs_to_retain]
