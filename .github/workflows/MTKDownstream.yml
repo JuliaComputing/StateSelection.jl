@@ -37,7 +37,7 @@ jobs:
           - Extensions
           - Downstream
           - FMI
-    runs-on: ${{ vars.USE_SELF_HOSTED == 'true' && 'self-hosted' || 'ubuntu-latest' }}
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v6
       - name: "Setup Julia ${{ matrix.version }}"
