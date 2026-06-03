@@ -1,9 +1,17 @@
 @data ClockVertex begin
+    # A variable identified by its index in `fullvars`
     Variable(Int)
+    # An equation identified by its index in `equations(state)`
     Equation(Int)
+    # An initialization equation identified by its index in `initialization_equations(state.sys)`
     InitEquation(Int)
+    # A concrete, known clock
     Clock(SciMLBase.AbstractClock)
+    # An unnamed, unnknown clock identified by some UUID stored in `ShiftIndex`
     InferredClock(UUID)
+    # An arbitrary expression for which we want to preserve clocking information
+    Expression(SymbolicT)
+    # Compatibility for ModelingToolkit's `DiscreteSystem` semantics.
     IntegerSequence
 end
 
@@ -21,6 +29,10 @@ struct ClockInference{S <: StateSelection.TransformationState}
     inference_graph::HyperGraph{ClockVertex.Type}
     """The set of variables with concrete domains."""
     inferred::BitSet
+    """A mapping from every argument of every clock operator to the clock it is on. More \
+    generally extensible to any expression for which it is deemed necessary to preserve \
+    clock information."""
+    expression_clocks::Dict{SymbolicT, TimeDomain}
 end
 
 function ClockInference(ts::StateSelection.TransformationState)
@@ -73,7 +85,7 @@ function ClockInference(ts::StateSelection.TransformationState)
         add_edge!(inference_graph, (varvert, dvert))
     end
     ClockInference{typeof(ts)}(ts, eq_domain, init_eq_domain, var_domain, inference_graph,
-                               inferred)
+                               inferred, Dict{SymbolicT, TimeDomain}())
 end
 
 struct NotInferredTimeDomain end
@@ -262,6 +274,7 @@ function (ivc::InferVariableClosure)(var::SymbolicT)
             nested_ivc(v)
         end
 
+        push!(arg_hyperedge, ClockVertex.Expression(arg))
         # NOTE: Ensure all branches here add `arg_hyperedge` to the inference graph. It
         # is the parent hyperedge for `nested_ivc`, so this closure is responsible for
         # adding it to the graph.
@@ -422,6 +435,7 @@ function infer_clocks!(ci::ClockInference)
                 ClockVertex.Clock(_) => nothing
                 ClockVertex.InferredClock(_) => nothing
                 ClockVertex.IntegerSequence() => nothing
+                ClockVertex.Expression(expr) => (ci.expression_clocks[expr] = clock)
             end
         end
     end

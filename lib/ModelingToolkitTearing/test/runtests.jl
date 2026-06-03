@@ -265,8 +265,10 @@ MTKTearing.is_timevarying_operator(::Op3) = true
 
 @testset "Clock inference handles nested clock operators correctly" begin
     @variables x(t) y(t) z(t) w(t)
-    k1 = ShiftIndex(Clock(0.1))
-    k2 = ShiftIndex(Clock(0.2))
+    clk1 = Clock(0.1)
+    clk2 = Clock(0.2)
+    k1 = ShiftIndex(clk1)
+    k2 = ShiftIndex(clk2)
 
     # From `Op1`, we should infer that `clock_of(z) == clock_of(y)`
     # From `Op2`, we should infer that `clock_of(w) == clock_of(Op3(x))`
@@ -281,6 +283,20 @@ MTKTearing.is_timevarying_operator(::Op3) = true
     @test issetequal(ts.fullvars, [x, x(k2-1), y, z, w, Op3(x), Op2(Op3(x), w), Op1(Op2(Op3(x), w) + x, 3sin(y))])
     ci = MTKTearing.ClockInference(ts)
     MTKTearing.infer_clocks!(ci)
+    idx = findfirst(isequal(w), ts.fullvars)
+    @test ci.var_domain[idx] == clk2
+    idx = findfirst(isequal(Op3(x)), ts.fullvars)
+    @test ci.var_domain[idx] == clk2
+    idx = findfirst(isequal(Op2(Op3(x), w)), ts.fullvars)
+    @test ci.var_domain[idx] == clk2
+    idx = findfirst(isequal(Op1(Op2(Op3(x), w) + x, 3sin(y))), ts.fullvars)
+    @test ci.var_domain[idx] == clk1
+
+    @test ci.expression_clocks[x] == clk2
+    @test ci.expression_clocks[Op3(x)] == clk2
+    @test ci.expression_clocks[w] == clk2
+    @test ci.expression_clocks[Op2(Op3(x), w) + x] == clk2
+    @test ci.expression_clocks[3sin(y)] == clk1
 
     # Check that this errors if `+ x` is not present.
     eqs = [
