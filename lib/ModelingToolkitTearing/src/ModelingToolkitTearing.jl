@@ -141,14 +141,7 @@ function MTKBase.unhack_system(sys::System)
             additional_subs[linsolve[i]] = x[i]
         end
 
-        # Compute A*x - b element-wise, skipping zero entries
-        for i in 1:N
-            res_i = -b_vec[i]
-            for j in 1:N
-                aij = A_mat[i, j]
-                SU._iszero(aij) && continue
-                res_i += aij * x[j]
-            end
+        for res_i in linear_scc_residuals(A_mat, b_vec, x)
             SU._iszero(res_i) && continue
             # If a linear SCC contains both `D(w)` and `w_t`, it'll contain the equation `D(w) ~ w_t`.
             # When unhacking it, `D(w)` will be totermed into `w_t`. Avoid adding the `0 ~ 0` equations.
@@ -178,6 +171,28 @@ function MTKBase.unhack_system(sys::System)
     MTKBase.store_to_mutable_cache!(sys, UnhackSystemCacheKey, newsys)
 
     return newsys
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Compute the residuals `r = A * x - b`.
+"""
+function linear_scc_residuals(A_mat::Matrix{SymbolicT}, b_vec::Vector{SymbolicT}, x::Vector{SymbolicT})
+    N = length(b_vec)
+    residuals = Vector{SymbolicT}(undef, N)
+    add_buffer = SU.ArgsT{VartypeT}()
+    for i in 1:N
+        empty!(add_buffer)
+        push!(add_buffer, -b_vec[i])
+        for j in 1:N
+            aij = A_mat[i, j]
+            SU._iszero(aij) && continue
+            push!(add_buffer, aij * x[j])
+        end
+        residuals[i] = SU.add_worker(VartypeT, add_buffer)
+    end
+    return residuals
 end
 
 function populate_inline_scc_map!(
