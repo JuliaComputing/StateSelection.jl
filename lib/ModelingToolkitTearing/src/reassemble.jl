@@ -450,16 +450,9 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
             linsol, eqs_mask, vars_mask = linsol_result
             @assert length(eqs_mask) == length(escc)
             @assert length(vars_mask) == length(vscc)
-            for (i, ieq) in enumerate(escc)
-                eqs_mask[i] && continue
-                # Currently, if an equation is filtered out it is matched to a variable.
-                # This needs to be changed if we update our heuristic.
-                var = eq_var_matching[ieq]::Int
-                codegen_equation!(eq_generator, neweqs[ieq], ieq, var; simplify)
-            end
-            escc = escc[eqs_mask]
-            vscc = vscc[vars_mask]
-            for (j, (ieq, iv)) in enumerate(zip(escc, vscc))
+            _escc = escc[eqs_mask]
+            _vscc = vscc[vars_mask]
+            for (j, (ieq, iv)) in enumerate(zip(_escc, _vscc))
                 ∫iv = diff_to_var[iv]
                 rhs = linsol[j]
                 if ∫iv isa Int
@@ -485,6 +478,16 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
                     push!(eq_generator.solved_eqs, eq)
                     push!(eq_generator.solved_vars, iv)
                 end
+            end
+
+            # Add the eliminated equations later so that the preceding loop
+            # can populate `total_sub` appropriately.
+            for (i, ieq) in enumerate(escc)
+                eqs_mask[i] && continue
+                # Currently, if an equation is filtered out it is matched to a variable.
+                # This needs to be changed if we update our heuristic.
+                var = eq_var_matching[ieq]::Int
+                codegen_equation!(eq_generator, neweqs[ieq], ieq, var; simplify)
             end
         else
             for ieq in escc
