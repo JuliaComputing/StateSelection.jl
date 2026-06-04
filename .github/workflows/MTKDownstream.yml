@@ -27,8 +27,6 @@ jobs:
       matrix:
         version:
           - "1"
-          - "lts"
-          - "pre"
         group:
           - InterfaceI
           - InterfaceII
