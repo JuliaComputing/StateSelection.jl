@@ -177,6 +177,12 @@ function carpanzano_tear_scc!(
     # `state_priority` semantics of dummy-derivative state selection. With uniform
     # priorities the behavior is unchanged.
     varpriority = has_state_priorities(structure) ? get_state_priorities(structure) : nothing
+    # Canonical (name-rank) tie-break after priorities: makes the tear-variable
+    # selection deterministic under equation/declaration reordering.
+    canonrank = has_canonical_ranks(structure) ? get_canonical_ranks(structure) : nothing
+    # Sort key: prefer HIGHER priority, then SMALLER canonical rank.
+    tearkey = v -> (varpriority === nothing ? 0 : -varpriority[v],
+                    canonrank === nothing ? 0 : canonrank[v])
     # Find variables which cannot be solved for using any of the equations in this SCC,
     # and remove them from `active_vars`.
     filter!(Base.Fix1(any, in(active_eqs)) ∘ Base.Fix1(𝑑neighbors, solvable_graph), active_vars)
@@ -248,11 +254,11 @@ function carpanzano_tear_scc!(
                 # We didn't update the matching, and the algorithm requires
                 # all variables in `active_vars` be initially matched to `unassigned` so
                 # this automatically makes it algebraic.
-                if varpriority === nothing
+                if varpriority === nothing && canonrank === nothing
                     alg_candidate = ivar
                     found_algvar = true
                     break
-                elseif alg_candidate == 0 || varpriority[ivar] > varpriority[alg_candidate]
+                elseif alg_candidate == 0 || tearkey(ivar) < tearkey(alg_candidate)
                     alg_candidate = ivar
                 end
             end
@@ -274,18 +280,18 @@ function carpanzano_tear_scc!(
         alg_var = 0
         max_incidence_cnt = typemin(Int)
         min_solvable_cnt = typemax(Int)
-        best_priority = typemin(Int)
+        best_key = (typemax(Int), typemax(Int))
         for ivar in active_vars
             cnt = count(in(active_eqs), 𝑑neighbors(graph, ivar))
             solvable_cnt = count(in(active_eqs), 𝑑neighbors(solvable_graph, ivar))
-            pri = varpriority === nothing ? 0 : varpriority[ivar]
+            key = tearkey(ivar)
             if iszero(alg_var) || cnt > max_incidence_cnt ||
                cnt == max_incidence_cnt && (solvable_cnt < min_solvable_cnt ||
-                solvable_cnt == min_solvable_cnt && pri > best_priority)
+                solvable_cnt == min_solvable_cnt && key < best_key)
                 alg_var = ivar
                 max_incidence_cnt = cnt
                 min_solvable_cnt = solvable_cnt
-                best_priority = pri
+                best_key = key
             end
         end
 

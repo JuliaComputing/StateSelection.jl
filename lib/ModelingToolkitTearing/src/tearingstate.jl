@@ -21,6 +21,12 @@ Base.@kwdef mutable struct SystemStructure <: StateSelection.SystemStructure
     var_types::Vector{VariableType}
     """State priorities corresponding to each variable in `fullvars`"""
     state_priorities::Vector{Int}
+    """
+    Canonical rank of each variable in `fullvars`: the rank of the variable's name in
+    lexicographic order. Used as a deterministic tie-break (after priorities) in tearing,
+    so that results do not depend on equation/declaration order.
+    """
+    canonical_ranks::Vector{Int}
     """Whether the system is discrete."""
     only_discrete::Bool
 end
@@ -29,7 +35,8 @@ function Base.copy(structure::SystemStructure)
     var_types = structure.var_types === nothing ? nothing : copy(structure.var_types)
     SystemStructure(copy(structure.var_to_diff), copy(structure.eq_to_diff),
         copy(structure.graph), copy(structure.solvable_graph),
-        var_types, copy(structure.state_priorities), structure.only_discrete)
+        var_types, copy(structure.state_priorities), copy(structure.canonical_ranks),
+        structure.only_discrete)
 end
 
 StateSelection.is_only_discrete(s::SystemStructure) = s.only_discrete
@@ -399,6 +406,7 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
     graph = build_incidence_graph(length(fullvars), symbolic_incidence, var2idx)
 
     state_priorities = build_state_priorities(sys, fullvars, var_to_diff)
+    canonical_ranks = invperm(sortperm(map(string, fullvars)))
 
     # Identify unknowns that do not appear in any equations and are thus not present in
     # `fullvars`. The bindings and initial conditions for these variables should be removed.
@@ -422,7 +430,8 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
     eq_to_diff = StateSelection.DiffGraph(nsrcs(graph))
 
     structure = SystemStructure(complete(var_to_diff), complete(eq_to_diff),
-                                complete(graph), nothing, var_types, state_priorities, false)
+                                complete(graph), nothing, var_types, state_priorities,
+                                canonical_ranks, false)
     return TearingState(sys, fullvars, structure, Equation[], param_derivative_map,
                         no_deriv_params, original_eqs, Equation[], falses(length(fullvars)),
                         typeof(sys)[], sources)
