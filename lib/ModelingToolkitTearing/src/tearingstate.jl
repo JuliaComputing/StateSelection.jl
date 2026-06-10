@@ -434,8 +434,16 @@ function build_state_priorities(sys::System, fullvars::Vector{SymbolicT}, var_to
     var_priorities = Int[]
     sizehint!(var_priorities, length(fullvars))
     for v in fullvars
-        arr, _ = MTKBase.split_indexed_var(v)
-        push!(var_priorities, get(sps, arr, 0))
+        # Component-granular lookup: a priority on the scalarized variable
+        # itself (e.g. `v_0[1] => 5`) takes precedence over a priority on its
+        # parent array variable. This allows distinguishing array components,
+        # which is impossible with the parent-array-only lookup.
+        p = get(sps, v, nothing)
+        if p === nothing
+            arr, _ = MTKBase.split_indexed_var(v)
+            p = get(sps, arr, 0)
+        end
+        push!(var_priorities, round(Int, p))
     end
 
     # Propagate priorities up the `var_to_diff` graph. Each variable's final priority is
