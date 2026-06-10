@@ -171,6 +171,12 @@ function carpanzano_tear_scc!(
     # way to implement algorithm A2 and analyze the benefits.
 
     (; graph, solvable_graph) = structure
+    # Variable priorities (when available) act as tie-breaks for the tear-variable
+    # selection below: among otherwise-equivalent candidates, prefer marking the
+    # variable with the HIGHEST priority as algebraic (torn), mirroring the
+    # `state_priority` semantics of dummy-derivative state selection. With uniform
+    # priorities the behavior is unchanged.
+    varpriority = has_state_priorities(structure) ? get_state_priorities(structure) : nothing
     # Find variables which cannot be solved for using any of the equations in this SCC,
     # and remove them from `active_vars`.
     filter!(Base.Fix1(any, in(active_eqs)) ∘ Base.Fix1(𝑑neighbors, solvable_graph), active_vars)
@@ -224,8 +230,12 @@ function carpanzano_tear_scc!(
         end
 
         # Find a variable in `active_vars` which is present in one of these equations
-        # and yet is not solvable in it.
+        # and yet is not solvable in it. With priorities available, scan all
+        # min-incidence equations and pick the highest-priority such variable
+        # (strict comparison: first-found wins ties, matching the unprioritized
+        # behavior when priorities are uniform).
         found_algvar = false
+        alg_candidate = 0
         for ieq in enodes_with_min_incidence
             empty!(non_solvable_incidence)
             append!(non_solvable_incidence, 𝑠neighbors(graph, ieq))
@@ -238,12 +248,21 @@ function carpanzano_tear_scc!(
                 # We didn't update the matching, and the algorithm requires
                 # all variables in `active_vars` be initially matched to `unassigned` so
                 # this automatically makes it algebraic.
-                found_algvar = true
-                delete!(active_vars, ivar)
-                break
+                if varpriority === nothing
+                    alg_candidate = ivar
+                    found_algvar = true
+                    break
+                elseif alg_candidate == 0 || varpriority[ivar] > varpriority[alg_candidate]
+                    alg_candidate = ivar
+                end
             end
 
             found_algvar && break
+        end
+
+        if alg_candidate != 0
+            delete!(active_vars, alg_candidate)
+            found_algvar = true
         end
 
         found_algvar && continue
@@ -255,13 +274,18 @@ function carpanzano_tear_scc!(
         alg_var = 0
         max_incidence_cnt = typemin(Int)
         min_solvable_cnt = typemax(Int)
+        best_priority = typemin(Int)
         for ivar in active_vars
             cnt = count(in(active_eqs), 𝑑neighbors(graph, ivar))
             solvable_cnt = count(in(active_eqs), 𝑑neighbors(solvable_graph, ivar))
-            if iszero(alg_var) || cnt > max_incidence_cnt || cnt == max_incidence_cnt && solvable_cnt < min_solvable_cnt
+            pri = varpriority === nothing ? 0 : varpriority[ivar]
+            if iszero(alg_var) || cnt > max_incidence_cnt ||
+               cnt == max_incidence_cnt && (solvable_cnt < min_solvable_cnt ||
+                solvable_cnt == min_solvable_cnt && pri > best_priority)
                 alg_var = ivar
                 max_incidence_cnt = cnt
                 min_solvable_cnt = solvable_cnt
+                best_priority = pri
             end
         end
 
