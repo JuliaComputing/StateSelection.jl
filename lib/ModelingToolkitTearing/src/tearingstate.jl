@@ -406,7 +406,7 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
     graph = build_incidence_graph(length(fullvars), symbolic_incidence, var2idx)
 
     state_priorities = build_state_priorities(sys, fullvars, var_to_diff)
-    canonical_ranks = invperm(sortperm(map(string, fullvars)))
+    canonical_ranks = build_canonical_ranks(fullvars)
 
     # Identify unknowns that do not appear in any equations and are thus not present in
     # `fullvars`. The bindings and initial conditions for these variables should be removed.
@@ -435,6 +435,64 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
     return TearingState(sys, fullvars, structure, Equation[], param_derivative_map,
                         no_deriv_params, original_eqs, Equation[], falses(length(fullvars)),
                         typeof(sys)[], sources)
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Structured, allocation-light canonical sort key for a variable: a tuple
+`(name, indices, opsig)` where `name` is the `Symbol` name of the (array)
+variable, `indices` are the integer indices when `v` is a scalarized array
+element (empty otherwise) and `opsig` encodes the operator chain wrapping the
+variable (`Differential` → `1`; `Shift` → `2` followed by its step count;
+any other operator → `3`). Comparing these tuples orders variables
+deterministically regardless of equation/declaration order, without
+stringifying symbolic expressions.
+"""
+function canonical_sort_key(v::SymbolicT)
+    opsig = ()
+    x = v
+    while true
+        stripped = @match x begin
+            BSImpl.Term(; f, args) && if f isa Differential end => begin
+                opsig = (opsig..., 1)
+                args[1]
+            end
+            BSImpl.Term(; f, args) && if f isa MTKBase.Shift end => begin
+                opsig = (opsig..., 2, f.steps)
+                args[1]
+            end
+            BSImpl.Term(; f, args) && if f isa SU.Operator && length(args) == 1 end => begin
+                opsig = (opsig..., 3)
+                args[1]
+            end
+            _ => nothing
+        end
+        stripped === nothing && break
+        x = stripped
+    end
+    idxs = ()
+    @match x begin
+        BSImpl.Term(; f, args) && if f === getindex end => begin
+            for i in Iterators.drop(args, 1)
+                ival = SU.isconst(i) ? manual_dispatch_is_small_int(unwrap_const(i))::Int : 0
+                idxs = (idxs..., ival)
+            end
+            x = args[1]
+        end
+        _ => nothing
+    end
+    return (getname(x)::Symbol, idxs, opsig)
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Rank of each variable in `fullvars` under the [`canonical_sort_key`](@ref) order.
+Used as a deterministic tie-break (after priorities) in tearing.
+"""
+function build_canonical_ranks(fullvars::Vector{SymbolicT})
+    return invperm(sortperm(map(canonical_sort_key, fullvars)))
 end
 
 function build_state_priorities(sys::System, fullvars::Vector{SymbolicT}, var_to_diff::StateSelection.DiffGraph)

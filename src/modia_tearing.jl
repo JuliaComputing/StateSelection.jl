@@ -45,7 +45,8 @@ function tearEquations!(ict::IncrementalCycleTracker, Gsolvable, es::Vector{Int}
                 # semantics of dummy-derivative state selection. The sort is
                 # stable, so behavior is unchanged whenever priorities are equal
                 # (e.g. all default 0). Do not mutate the graph's adjacency list.
-                vs = sort(Int[v for v in vs]; by = varpriority, alg = Base.Sort.DEFAULT_STABLE)
+                vs = copy(vs)
+                sort!(vs; by = varpriority, alg = Base.Sort.DEFAULT_STABLE)
             end
             if check_der
                 # if there're differentiated variables, then only consider them
