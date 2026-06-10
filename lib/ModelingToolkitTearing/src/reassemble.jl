@@ -787,7 +787,8 @@ function __reduce_linear_system!(A::StateSelection.CLIL.SparseMatrixCLIL{Num, In
             cst += coeff * other_cst
         end
 
-        aliases[var] = SparseArrays.sparsevec(new_I, new_V, length(coeffs))
+        # `sparsevec` sums duplicate indices but keeps explicit zeros; drop them.
+        aliases[var] = SparseArrays.dropzeros!(SparseArrays.sparsevec(new_I, new_V, length(coeffs)))
         constants[var] = cst
     end
 

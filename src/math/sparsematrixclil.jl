@@ -91,6 +91,24 @@ zero!(a::SparseVector) = (empty!(a.nzind); empty!(a.nzval))
 zero!(a::CLILVector) = zero!(a.vec)
 SparseArrays.dropzeros!(a::CLILVector) = SparseArrays.dropzeros!(a.vec)
 
+# Remove explicitly-stored zeros from each row, in place.
+function SparseArrays.dropzeros!(S::SparseMatrixCLIL)
+    for r in eachindex(S.row_vals)
+        cols = S.row_cols[r]
+        vals = S.row_vals[r]
+        j = 0
+        for k in eachindex(vals)
+            iszero(vals[k]) && continue
+            j += 1
+            cols[j] = cols[k]
+            vals[j] = vals[k]
+        end
+        resize!(cols, j)
+        resize!(vals, j)
+    end
+    return S
+end
+
 struct NonZeros{T <: AbstractArray}
     v::T
 end
