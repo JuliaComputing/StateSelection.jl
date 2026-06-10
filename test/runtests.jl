@@ -59,4 +59,16 @@ include("carpanzano_tearing.jl")
     @test mm2.row_cols == [[1, 2]]
     @test mm2.row_vals == [[7, 5]]
     @test mm2.ncols == 2
+
+    # An alias carrying an explicit stored zero (as `sparsevec` produces when
+    # duplicate indices cancel) must not leak in as a phantom structural nonzero.
+    # Row references var2 (removed, aliased to 0*var1) and var3 (retained); there
+    # is no direct var1 term, so the only contribution to col 1 is the zero.
+    mm = SSel.CLIL.SparseMatrixCLIL([0 1 1])
+    old_to_new_eq = [1]
+    old_to_new_var = [1, 0, 2]
+    aliases = Dict(2 => sparsevec([1, 1], [2, -2], 3))
+    mm2 = SSel.get_new_mm(aliases, old_to_new_eq, old_to_new_var, mm)
+    @test mm2.row_cols == [[2]]
+    @test mm2.row_vals == [[1]]
 end

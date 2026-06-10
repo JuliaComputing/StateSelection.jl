@@ -341,10 +341,8 @@ function get_new_mm(
         push!(final_row_vals, new_row_val_i[indices[1]])
         for i in Iterators.drop(eachindex(indices), 1)
             col = new_row_col_i[indices[i]]
-            # Compare against the last *retained* column rather than the previous
-            # sorted entry: a prior cancellation may have `pop!`ed the matching
-            # entry, in which case the remaining duplicates of `col` must start a
-            # fresh accumulator instead of folding into an unrelated column.
+            # Compare against the last retained column, not the previous sorted
+            # entry: a prior cancellation may have `pop!`ed the matching entry.
             if !isempty(final_row_cols) && col == final_row_cols[end]
                 final_row_vals[end] += new_row_val_i[indices[i]]
                 if iszero(final_row_vals[end])
@@ -356,13 +354,16 @@ function get_new_mm(
                 push!(final_row_vals, new_row_val_i[indices[i]])
             end
         end
-        
+
         push!(new_row_cols, final_row_cols)
         push!(new_row_vals, final_row_vals)
         push!(new_nzrows, old_to_new_eq[eq])
     end
 
-    return typeof(mm)(new_nparentrows, count(!iszero, old_to_new_var), new_nzrows, new_row_cols, new_row_vals)
+    # Drop explicit zeros (e.g. from an alias that cancelled to zero) so they
+    # don't survive as phantom structural nonzeros.
+    new_mm = typeof(mm)(new_nparentrows, count(!iszero, old_to_new_var), new_nzrows, new_row_cols, new_row_vals)
+    return SparseArrays.dropzeros!(new_mm)
 end
 
 struct BadMMAliasError <: Exception
