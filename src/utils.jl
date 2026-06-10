@@ -340,14 +340,19 @@ function get_new_mm(
         push!(final_row_cols, new_row_col_i[indices[1]])
         push!(final_row_vals, new_row_val_i[indices[1]])
         for i in Iterators.drop(eachindex(indices), 1)
-            if new_row_col_i[indices[i]] == new_row_col_i[indices[i - 1]]
+            col = new_row_col_i[indices[i]]
+            # Compare against the last *retained* column rather than the previous
+            # sorted entry: a prior cancellation may have `pop!`ed the matching
+            # entry, in which case the remaining duplicates of `col` must start a
+            # fresh accumulator instead of folding into an unrelated column.
+            if !isempty(final_row_cols) && col == final_row_cols[end]
                 final_row_vals[end] += new_row_val_i[indices[i]]
                 if iszero(final_row_vals[end])
                     pop!(final_row_cols)
                     pop!(final_row_vals)
                 end
             else
-                push!(final_row_cols, new_row_col_i[indices[i]])
+                push!(final_row_cols, col)
                 push!(final_row_vals, new_row_val_i[indices[i]])
             end
         end
