@@ -491,7 +491,9 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
             end
             return true
         else
-            return false
+            # Inline path inapplicable: surface the reason (`NonlinearBlockEq` carrying
+            # the offending equation, or `nothing`) so the caller can peel and retry.
+            return linsol_result
         end
     end
 
@@ -521,20 +523,54 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
     # behaviour (one block per SCC) is unchanged.
     groups = _group_inline_linear_families(
         prepared, MTKBase.maybe_zeros(state.sys), neweqs, graph, is_disc, inline_linear_sccs)
-
+    if _inline_scc_check_enabled()
+        fams = [grp for grp in groups if length(grp) > 1]
+        isempty(fams) || @info "Inline-linear-SCC families formed" nblocks=length(prepared) nfamilies=length(fams) family_equation_counts=[sum(length(prepared[k][2]) for k in grp) for grp in fams]
+    end
     for grp in groups
         if length(grp) == 1
             vscc, escc = prepared[grp[1]]
             emit_block!(vscc, escc)
+            continue
+        end
+        # Solve the family jointly. If the joint inline solve fails because one
+        # member's equation is nonlinear in the union's variables, peel that member
+        # out of the family and retry (issue #98): this prunes e.g. kinematic blocks
+        # while keeping the (linear) reaction-force core that actually exchanges
+        # gauge. Peeled members are emitted as their own blocks afterwards; any
+        # residual cross-references resolve through the dependency-ordered codegen.
+        members = collect(grp)
+        peeled = Int[]
+        emitted = false
+        while length(members) > 1
+            vscc = reduce(vcat, (prepared[k][1] for k in members))
+            escc = reduce(vcat, (prepared[k][2] for k in members))
+            res = emit_block!(vscc, escc; allow_regular = false)
+            if res === true
+                emitted = true
+                break
+            elseif res isa NonlinearBlockEq
+                bad = findfirst(k -> res.ieq in prepared[k][2], members)
+                bad === nothing && break
+                push!(peeled, members[bad])
+                deleteat!(members, bad)
+            else
+                # Structurally inapplicable (e.g. contains a torn differential
+                # variable) — peeling cannot help.
+                break
+            end
+        end
+        if emitted
+            if _inline_scc_check_enabled() && !isempty(peeled)
+                @info "Inline-linear-SCC family solved jointly after peeling" family_blocks=length(grp) peeled_blocks=length(peeled) joint_equations=sum(length(prepared[k][2]) for k in members)
+            end
+            for k in sort!(peeled)
+                emit_block!(prepared[k]...)
+            end
         else
-            vscc = reduce(vcat, (prepared[k][1] for k in grp))
-            escc = reduce(vcat, (prepared[k][2] for k in grp))
-            # Solve the family jointly; if the joint inline solve does not apply, fall
-            # back to emitting each member as its own block (original behaviour).
-            if !emit_block!(vscc, escc; allow_regular = false)
-                for k in grp
-                    emit_block!(prepared[k]...)
-                end
+            # Fall back to emitting every member as its own block (original behaviour).
+            for k in sort!(vcat(members, peeled))
+                emit_block!(prepared[k]...)
             end
         end
     end
@@ -728,6 +764,18 @@ function _group_inline_linear_families(
     return groups
 end
 
+"""
+    $TYPEDEF
+
+Returned by [`get_linear_scc_linsol`](@ref) instead of `nothing` when the inline
+linear solve is inapplicable because a specific equation is nonlinear in one of
+the block's variables. Carries the global index of the offending equation so a
+jointly-solved family can peel the member block owning it and retry (issue #98).
+"""
+struct NonlinearBlockEq
+    ieq::Int
+end
+
 const INLINE_LINEAR_SCC_OP = (\)
 
 """
@@ -786,7 +834,7 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
         for (eqidx, resid) in enumerate(b)
             Graphs.has_edge(graph, BipartiteEdge(alg_eqs[eqidx], alg_vars[varidx])) || continue
             p, q, islinear = lex(resid)
-            islinear || return nothing
+            islinear || return NonlinearBlockEq(alg_eqs[eqidx])
             if !SU._iszero(p)
                 # We're iterating in increasing `varidx` (column index) so we can just `push!`
                 push!(A.row_cols[eqidx], varidx)
@@ -818,7 +866,7 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
                 isempty(intersect(var_atoms[varidx], bsyms)) && continue
                 lex = MTKBase.get_linear_expander_for!(sys, var, true)
                 p, q, islinear = lex(b[eqidx])
-                islinear || return nothing
+                islinear || return NonlinearBlockEq(alg_eqs[eqidx])
                 b[eqidx] = q
                 if !SU._iszero(p)
                     push!(A.row_cols[eqidx], varidx)
@@ -976,7 +1024,20 @@ function _deterministic_subs(containers...)
     symvec = sort!(collect(syms); by = string)
     seed = foldl((h, s) -> hash(string(s), h), symvec; init = UInt(0x5eed))
     rng = Random.MersenneTwister(seed % typemax(UInt) + one(UInt))
-    subs = Dict{Any, Float64}(s => randn(rng) for s in symvec)
+    # Bounded draws in (0.15, 0.85): generic enough for rank/identity probing while
+    # keeping common expression domains valid (sqrt(1 - x^2), log(x), 1/x, ...).
+    # Array-shaped symbols get an array of draws so indexing still folds.
+    draw() = 0.15 + 0.7 * rand(rng)
+    subs = Dict{Any, Any}()
+    for s in symvec
+        sh = SU.shape(unwrap(s))
+        if sh isa SU.Unknown || isempty(sh)
+            subs[s] = draw()
+        else
+            dims = map(length, Tuple(sh))
+            subs[s] = [draw() for _ in CartesianIndices(dims)]
+        end
+    end
     return subs, rng
 end
 
@@ -1179,10 +1240,20 @@ function __reduce_linear_system!(A::StateSelection.CLIL.SparseMatrixCLIL{Num, In
     A = StateSelection.get_new_mm(aliases, old_to_new_eq, old_to_new_var, A)
 
     if _check
-        A_red_check = collect(A)::Matrix{Num}
-        _reduction_identity_ok(A0_check, b0_check, A_red_check, b, aliases, constants,
-                               eqs_mask, vars_mask, old_to_new_eq)
-        _reduction_rank_report(A0_check, b0_check, A_red_check, b, alg_vars)
+        # Best-effort diagnostics: a probe point can still violate an expression's
+        # domain (e.g. sqrt of a negative subexpression); skip rather than abort.
+        try
+            A_red_check = collect(A)::Matrix{Num}
+            _reduction_identity_ok(A0_check, b0_check, A_red_check, b, aliases, constants,
+                                   eqs_mask, vars_mask, old_to_new_eq)
+            _reduction_rank_report(A0_check, b0_check, A_red_check, b, alg_vars)
+        catch err
+            err isa InterruptException && rethrow()
+            # The self-check is best-effort, opt-in diagnostics; a probe point can
+            # violate an expression's domain or an exotic term can resist numeric
+            # evaluation. Skip rather than abort compilation.
+            @warn "Inline-linear-SCC self-check skipped" block_n=length(b0_check) exception=err
+        end
     end
 
     return A, b, eqs_mask, vars_mask
