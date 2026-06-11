@@ -491,8 +491,8 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
             end
             return true
         else
-            # Inline path inapplicable: surface the reason (`NonlinearBlockEq` carrying
-            # the offending equation, or `nothing`) so the caller can peel and retry.
+            # Inline path inapplicable: surface the reason (`NonlinearBlockEqs` carrying
+            # the offending equations, or `nothing`) so the caller can peel and retry.
             return linsol_result
         end
     end
@@ -522,7 +522,7 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
     # active when `maybe_zeros` is set and inline linear SCCs are enabled, so the default
     # behaviour (one block per SCC) is unchanged.
     groups = _group_inline_linear_families(
-        prepared, MTKBase.maybe_zeros(state.sys), neweqs, graph, is_disc, inline_linear_sccs)
+        state, prepared, MTKBase.maybe_zeros(state.sys), neweqs, graph, is_disc, inline_linear_sccs)
     if _inline_scc_check_enabled()
         fams = [grp for grp in groups if length(grp) > 1]
         isempty(fams) || @info "Inline-linear-SCC families formed" nblocks=length(prepared) nfamilies=length(fams) family_equation_counts=[sum(length(prepared[k][2]) for k in grp) for grp in fams]
@@ -533,43 +533,18 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
             emit_block!(vscc, escc)
             continue
         end
-        # Solve the family jointly. If the joint inline solve fails because one
-        # member's equation is nonlinear in the union's variables, peel that member
-        # out of the family and retry (issue #98): this prunes e.g. kinematic blocks
-        # while keeping the (linear) reaction-force core that actually exchanges
-        # gauge. Peeled members are emitted as their own blocks afterwards; any
-        # residual cross-references resolve through the dependency-ordered codegen.
-        members = collect(grp)
-        peeled = Int[]
-        emitted = false
-        while length(members) > 1
-            vscc = reduce(vcat, (prepared[k][1] for k in members))
-            escc = reduce(vcat, (prepared[k][2] for k in members))
-            res = emit_block!(vscc, escc; allow_regular = false)
-            if res === true
-                emitted = true
-                break
-            elseif res isa NonlinearBlockEq
-                bad = findfirst(k -> res.ieq in prepared[k][2], members)
-                bad === nothing && break
-                push!(peeled, members[bad])
-                deleteat!(members, bad)
-            else
-                # Structurally inapplicable (e.g. contains a torn differential
-                # variable) — peeling cannot help.
-                break
+        # Solve the family jointly. The grouping pre-screens members for linearity
+        # in the union's variables and keeps families path-closed (convex), so a
+        # failure here is rare (e.g. linearity lost through `total_sub`
+        # substitution); fall back to emitting each member as its own block.
+        vscc = reduce(vcat, (prepared[k][1] for k in grp))
+        escc = reduce(vcat, (prepared[k][2] for k in grp))
+        res = emit_block!(vscc, escc; allow_regular = false)
+        if res !== true
+            if _inline_scc_check_enabled()
+                @warn "Inline-linear-SCC family joint solve fell back to per-member emission" family_blocks=length(grp) reason=res
             end
-        end
-        if emitted
-            if _inline_scc_check_enabled() && !isempty(peeled)
-                @info "Inline-linear-SCC family solved jointly after peeling" family_blocks=length(grp) peeled_blocks=length(peeled) joint_equations=sum(length(prepared[k][2]) for k in members)
-            end
-            for k in sort!(peeled)
-                emit_block!(prepared[k]...)
-            end
-        else
-            # Fall back to emitting every member as its own block (original behaviour).
-            for k in sort!(vcat(members, peeled))
+            for k in grp
                 emit_block!(prepared[k]...)
             end
         end
@@ -648,7 +623,7 @@ single node (families are path-closed, so the contraction cannot create cycles).
 behaviour — including the emission order — unchanged.
 """
 function _group_inline_linear_families(
-        prepared::Vector{NTuple{2, Vector{Int}}}, maybe_zeros,
+        state::TearingState, prepared::Vector{NTuple{2, Vector{Int}}}, maybe_zeros,
         neweqs::Vector{Equation}, graph, is_disc::Bool, inline_linear_sccs::Bool)
     n = length(prepared)
     singletons() = [[k] for k in 1:n]
@@ -678,10 +653,48 @@ function _group_inline_linear_families(
     for (k, (vscc, _)) in enumerate(prepared), v in vscc
         var_block[v] = k
     end
+
+    # Whether all equations of block `b` are linear in every incident variable
+    # belonging to block `j` — i.e. whether `b` tolerates `j` in a jointly-solved
+    # linear family. Linearity is *set-dependent*: a block may be nonlinear in some
+    # other block's variables (e.g. cos of another block's angle) and still be
+    # perfectly linear in its own and its family's variables, so this is checked
+    # pairwise over a candidate family's closure rather than globally. Memoized.
+    (; fullvars, sys) = state
+    pairlinear_cache = Dict{Tuple{Int, Int}, Bool}()
+    blockpair_linear = function (b, j)
+        get!(pairlinear_cache, (b, j)) do
+            _, escc_b = prepared[b]
+            for ieq in escc_b
+                eq = neweqs[ieq]
+                res = SU._iszero(eq.lhs) ? eq.rhs : eq.rhs - eq.lhs
+                for v in 𝑠neighbors(graph, ieq)
+                    get(var_block, v, 0) == j || continue
+                    lex = MTKBase.get_linear_expander_for!(sys, fullvars[v], true)
+                    _, _, islin = lex(res)
+                    islin || return false
+                end
+            end
+            return true
+        end
+    end
+    closure_linear = function (cl)
+        for b in cl, j in cl
+            b == j && continue
+            blockpair_linear(b, j) || return false
+        end
+        return true
+    end
     dag = Graphs.SimpleDiGraph(n)
     for (k, (_, escc)) in enumerate(prepared), ieq in escc, v in 𝑠neighbors(graph, ieq)
         j = get(var_block, v, 0)
         (j == 0 || j == k) && continue
+        # Forward edges only: the prepared blocks are in BLT order, which is a valid
+        # linearization of the true (matching-based) dependencies. Raw residual
+        # incidence also contains backward references (e.g. through torn variables
+        # of later blocks); treating those as dependencies would make this graph
+        # cyclic even though sequential emission is perfectly well-defined.
+        j < k || continue
         Graphs.add_edge!(dag, j, k)
     end
 
@@ -715,65 +728,140 @@ function _group_inline_linear_families(
     # rank-deficible block on a path between two members is reachability-connected to
     # them and thus in the same component, and a shared non-deficible block would chain
     # the two components together.
+    # Full-graph BFS (ignores mergeability): used to compute the convex (path)
+    # closure of a candidate family in the *full* DAG. Convexity there is a
+    # correctness requirement — a family must absorb every block lying on a
+    # dependency path between its members, since such blocks both consume family
+    # outputs and feed family inputs, and a joint solve that treats them as
+    # external inputs would be circular.
+    bfs_full = function (sources, neighborfn)
+        seen = falses(n)
+        stack = collect(Int, sources)
+        seen[stack] .= true
+        while !isempty(stack)
+            u = pop!(stack)
+            for w in neighborfn(dag, u)
+                seen[w] && continue
+                seen[w] = true
+                push!(stack, w)
+            end
+        end
+        return seen
+    end
+    full_closure(members) = bfs_full(members, Graphs.outneighbors) .&
+                            bfs_full(members, Graphs.inneighbors)
+
     family_of = zeros(Int, n)
     nfam = 0
-    for comp in Graphs.connected_components(conn)
-        length(comp) > 1 || continue
-        closure = bfs(comp, Graphs.outneighbors) .& bfs(comp, Graphs.inneighbors)
+    finalize_family! = function (cur)
+        length(cur) > 1 || return
+        closure = full_closure(cur)
+        # Closures of distinct families must not overlap (every block is emitted
+        # exactly once); skip if a previous family already claimed part of it.
+        if any(j -> family_of[j] != 0, findall(closure))
+            _inline_scc_check_enabled() &&
+                println("FAMGREEDY family skipped (closure overlap): members=", cur)
+            return
+        end
         nfam += 1
         family_of[closure] .= nfam
     end
+    for comp in Graphs.connected_components(conn)
+        length(comp) > 1 || continue
+        # Grow families greedily along the topological order: extend while the
+        # full-DAG closure of the candidate set remains entirely mergeable, so
+        # each finalized family is convex AND jointly linearly solvable. Members
+        # whose inclusion would drag in a non-mergeable block (e.g. the chassis
+        # block far downstream, with nonlinear kinematics on the intervening
+        # paths) start a new family instead.
+        members = sort(comp)
+        cur = Int[members[1]]
+        for m in Iterators.drop(members, 1)
+            cand = vcat(cur, m)
+            closure = full_closure(cand)
+            cl = findall(closure)
+            if all(k -> family_of[k] == 0, cl) && closure_linear(cl)
+                cur = cand
+            else
+                _inline_scc_check_enabled() &&
+                    println("FAMGREEDY cannot extend ", cur, " by ", m, ": closure=", length(cl))
+                finalize_family!(cur)
+                cur = Int[m]
+            end
+        end
+        finalize_family!(cur)
+    end
+    _inline_scc_check_enabled() &&
+        println("FAMGREEDY formed nfam=", nfam, " sizes=", [count(==(f), family_of) for f in 1:nfam])
     iszero(nfam) && return singletons()
 
     # Emit in a topological order of the DAG with each family contracted to one node.
-    # Families are path-closed, so the contraction cannot create cycles.
-    unit_id(k) = family_of[k] == 0 ? nfam + k : family_of[k]
-    unit_blocks = Dict{Int, Vector{Int}}()
-    for k in 1:n
-        push!(get!(Vector{Int}, unit_blocks, unit_id(k)), k)
-    end
-    indeg = Dict{Int, Int}(u => 0 for u in keys(unit_blocks))
-    outs = Dict{Int, Set{Int}}(u => Set{Int}() for u in keys(unit_blocks))
-    for e in Graphs.edges(dag)
-        uj = unit_id(Graphs.src(e))
-        uk = unit_id(Graphs.dst(e))
-        (uj == uk || uk in outs[uj]) && continue
-        push!(outs[uj], uk)
-        indeg[uk] += 1
-    end
-    # Kahn's algorithm, preferring the unit containing the smallest original block index
-    # to keep the emission order stable.
-    minidx = Dict{Int, Int}(u => first(bs) for (u, bs) in unit_blocks)
-    ready = [u for (u, d) in indeg if d == 0]
-    groups = Vector{Int}[]
-    while !isempty(ready)
-        bestpos = 1
-        for p in 2:length(ready)
-            minidx[ready[p]] < minidx[ready[bestpos]] && (bestpos = p)
+    # Even disjoint convex families need not be mutually orderable: contracting two
+    # families that interleave in the block order can create a cycle through the
+    # blocks between them. When Kahn's algorithm stalls, dissolve one family that is
+    # stuck in the residual cycle and retry, keeping a maximal orderable subset.
+    while true
+        unit_id(k) = family_of[k] == 0 ? nfam + k : family_of[k]
+        unit_blocks = Dict{Int, Vector{Int}}()
+        for k in 1:n
+            push!(get!(Vector{Int}, unit_blocks, unit_id(k)), k)
         end
-        u = ready[bestpos]
-        deleteat!(ready, bestpos)
-        push!(groups, unit_blocks[u])
-        for w in outs[u]
-            (indeg[w] -= 1) == 0 && push!(ready, w)
+        indeg = Dict{Int, Int}(u => 0 for u in keys(unit_blocks))
+        outs = Dict{Int, Set{Int}}(u => Set{Int}() for u in keys(unit_blocks))
+        for e in Graphs.edges(dag)
+            uj = unit_id(Graphs.src(e))
+            uk = unit_id(Graphs.dst(e))
+            (uj == uk || uk in outs[uj]) && continue
+            push!(outs[uj], uk)
+            indeg[uk] += 1
         end
+        # Kahn's algorithm, preferring the unit containing the smallest original block
+        # index to keep the emission order stable.
+        minidx = Dict{Int, Int}(u => first(bs) for (u, bs) in unit_blocks)
+        ready = [u for (u, d) in indeg if d == 0]
+        groups = Vector{Int}[]
+        emitted_units = Set{Int}()
+        while !isempty(ready)
+            bestpos = 1
+            for p in 2:length(ready)
+                minidx[ready[p]] < minidx[ready[bestpos]] && (bestpos = p)
+            end
+            u = ready[bestpos]
+            deleteat!(ready, bestpos)
+            push!(groups, unit_blocks[u])
+            push!(emitted_units, u)
+            for w in outs[u]
+                (indeg[w] -= 1) == 0 && push!(ready, w)
+            end
+        end
+        sum(length, groups; init = 0) == n && return groups
+        # Stalled: some families are part of a contracted cycle. Dissolve the stalled
+        # family with the largest first-block index (preserving the earliest ones).
+        stalled = [f for f in 1:nfam if !(f in emitted_units) && any(==(f), family_of)]
+        if isempty(stalled)
+            # Cycle without any family involved cannot happen on a BLT block list;
+            # be defensive anyway.
+            return singletons()
+        end
+        drop = argmax(f -> minidx[f], stalled)
+        _inline_scc_check_enabled() &&
+            println("FAMGREEDY dissolving family ", drop, " (unorderable against earlier families)")
+        family_of[family_of .== drop] .= 0
+        any(!=(0), family_of) || return singletons()
     end
-    # Defensive: should the contracted graph somehow contain a cycle, Kahn's algorithm
-    # stalls before emitting every block; fall back to the default per-SCC blocks.
-    sum(length, groups; init = 0) == n || return singletons()
-    return groups
 end
 
 """
     $TYPEDEF
 
 Returned by [`get_linear_scc_linsol`](@ref) instead of `nothing` when the inline
-linear solve is inapplicable because a specific equation is nonlinear in one of
-the block's variables. Carries the global index of the offending equation so a
-jointly-solved family can peel the member block owning it and retry (issue #98).
+linear solve is inapplicable because equations are nonlinear in the block's
+variables. Carries the global indices of all offending equations so a
+jointly-solved family can peel the member blocks owning them and retry in a
+single step (issue #98).
 """
-struct NonlinearBlockEq
-    ieq::Int
+struct NonlinearBlockEqs
+    ieqs::Vector{Int}
 end
 
 const INLINE_LINEAR_SCC_OP = (\)
@@ -829,12 +917,19 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
         b[eqidx] = resid
     end
 
+    bad_eqs = Int[]
     for (varidx, var) in enumerate(vars)
         lex = MTKBase.get_linear_expander_for!(sys, var, true)
         for (eqidx, resid) in enumerate(b)
             Graphs.has_edge(graph, BipartiteEdge(alg_eqs[eqidx], alg_vars[varidx])) || continue
+            alg_eqs[eqidx] in bad_eqs && continue
             p, q, islinear = lex(resid)
-            islinear || return NonlinearBlockEq(alg_eqs[eqidx])
+            if !islinear
+                # Record and keep scanning so a jointly-solved family can peel all
+                # offending member blocks in one step rather than one per retry.
+                push!(bad_eqs, alg_eqs[eqidx])
+                continue
+            end
             if !SU._iszero(p)
                 # We're iterating in increasing `varidx` (column index) so we can just `push!`
                 push!(A.row_cols[eqidx], varidx)
@@ -843,6 +938,7 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
             b[eqidx] = q
         end
     end
+    isempty(bad_eqs) || return NonlinearBlockEqs(bad_eqs)
 
     # The `has_edge` gate above relies on the structural incidence `graph`, which is
     # mutated during reassembly and can desync from the `total_sub`-substituted residual.
@@ -866,7 +962,7 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
                 isempty(intersect(var_atoms[varidx], bsyms)) && continue
                 lex = MTKBase.get_linear_expander_for!(sys, var, true)
                 p, q, islinear = lex(b[eqidx])
-                islinear || return NonlinearBlockEq(alg_eqs[eqidx])
+                islinear || return NonlinearBlockEqs([alg_eqs[eqidx]])
                 b[eqidx] = q
                 if !SU._iszero(p)
                     push!(A.row_cols[eqidx], varidx)
