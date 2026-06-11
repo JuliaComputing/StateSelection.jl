@@ -254,7 +254,7 @@ end
     mz = Symbolics.SymbolicT[unwrap(p)]
 
     # Coupled + rank-deficible blocks 1,2 merge; block 3 (not deficible) and block 4
-    # (not coupled to its predecessor) stay separate.
+    # (not coupled to blocks 1,2) stay separate.
     @test MTKTearing._group_inline_linear_families(prepared, mz, neweqs, g, false, true) ==
           [[1, 2], [3], [4]]
 
@@ -266,6 +266,28 @@ end
           [[1], [2], [3], [4]]
     @test MTKTearing._group_inline_linear_families(prepared, mz, neweqs, g, false, false) ==
           [[1], [2], [3], [4]]
+
+    # Non-adjacent family members are connected through the dependency DAG. Blocks 1 and 3
+    # are rank-deficible; block 2 is not, but lies on the dependency path 1 → 2 → 3, so the
+    # path closure pulls it into the family.
+    neweqs2 = [
+        p * a ~ 0,        # block 1 (deficible)
+        0 ~ b - a,        # block 2 (not deficible, on the path between 1 and 3)
+        0 ~ c - p * b,    # block 3 (deficible)
+    ]
+    prepared2 = NTuple{2, Vector{Int}}[([1], [1]), ([2], [2]), ([3], [3])]
+    g2 = BipartiteGraph(3, 3)
+    add_edge!(g2, BipartiteEdge(2, 1))   # block 2's equation references block 1's variable
+    add_edge!(g2, BipartiteEdge(3, 2))   # block 3's equation references block 2's variable
+    @test MTKTearing._group_inline_linear_families(prepared2, mz, neweqs2, g2, false, true) ==
+          [[1, 2, 3]]
+
+    # An unrelated block between two family members is NOT pulled in (no path through it),
+    # and the family is emitted before it (contracted topological order, stable by index).
+    g3 = BipartiteGraph(3, 3)
+    add_edge!(g3, BipartiteEdge(3, 1))   # block 3's equation references block 1's variable
+    @test MTKTearing._group_inline_linear_families(prepared2, mz, neweqs2, g3, false, true) ==
+          [[1, 3], [2]]
 end
 
 @testset "`system_subset(::SystemStructure)` subsets `.state_priorities`" begin

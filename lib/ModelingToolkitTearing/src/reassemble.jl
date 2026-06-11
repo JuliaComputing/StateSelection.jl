@@ -583,23 +583,33 @@ end
     $TYPEDSIGNATURES
 
 Group the prepared inline-linear blocks (`prepared[k] = (vscc, escc)`, in block-triangular
-order) into families that should be solved jointly, returning a `Vector{Vector{Int}}` of
-index groups (each `[k]` is solved on its own; a multi-element group is solved as one joint
-linear system).
+order) into the units in which they are emitted, returning a `Vector{Vector{Int}}` of index
+groups in a valid (topological) emission order. Most groups are singletons `[k]`; a
+multi-element group is a *family* that must be solved as one joint linear system.
 
 The inline-linear-SCC pass solves blocks sequentially, substituting each block's solution
 into the downstream blocks. At a degenerate parameter point a block can become
 rank-deficient; its (gauge) solution choice is then substituted downstream and can make a
 dependent block inconsistent even though the *union* of the family's equations is
-satisfiable (issue #98). To avoid this we keep such a family unsubstituted and solve it as
-one block.
+satisfiable (issue #98). To avoid this we keep such families unsubstituted and solve each
+jointly.
 
-A family is a maximal run of consecutive blocks that are (a) each *runtime-rank-deficible*
-— their equations reference a `maybe_zeros` parameter, so a coefficient can vanish and drop
-the rank — and (b) chained by structural coupling (each block's equations reference the
-previous block's variables). Blocks whose coefficients cannot vanish (e.g. a large
-full-rank chassis block) are never pulled in, and when `maybe_zeros` is empty no grouping
-happens at all, leaving the default one-block-per-SCC behaviour unchanged.
+Families are computed on the block-level dependency DAG (edge `j → k` iff block `k`'s
+equations structurally reference block `j`'s variables; members of a family are typically
+*not* adjacent in the block-triangular order):
+
+1. A block is *runtime-rank-deficible* if its equations reference a `maybe_zeros`
+   parameter, so a coefficient can vanish at runtime and drop the rank.
+2. Rank-deficible blocks that reach each other through the DAG (possibly through
+   intermediate blocks) belong to the same family.
+3. Each family is closed over the blocks lying on dependency paths between its members, so
+   the merged system is self-contained: every variable it references is either solved
+   upstream or part of the merged block.
+
+The groups are returned in a topological order of the DAG with each family contracted to a
+single node (families are path-closed, so the contraction cannot create cycles). When
+`maybe_zeros` is empty no grouping happens at all, leaving the default one-block-per-SCC
+behaviour — including the emission order — unchanged.
 """
 function _group_inline_linear_families(
         prepared::Vector{NTuple{2, Vector{Int}}}, maybe_zeros,
@@ -624,35 +634,97 @@ function _group_inline_linear_families(
             references_maybe_zeros(res)
         end
     end
-    # `coupled[k]`: block `k`'s equations structurally reference block `k-1`'s variables.
-    # Only relevant (and only worth the cost) between two rank-deficible blocks.
-    coupled = falses(n)
-    for k in 2:n
-        (droppable[k] && droppable[k - 1]) || continue
-        prev_vars = prepared[k - 1][1]
-        this_eqs = prepared[k][2]
-        coupled[k] = any(this_eqs) do ieq
-            any(v -> Graphs.has_edge(graph, BipartiteEdge(ieq, v)), prev_vars)
-        end
+    any(droppable) || return singletons()
+
+    # Block-level dependency DAG: edge `j → k` iff block `k`'s equations structurally
+    # reference block `j`'s variables.
+    var_block = Dict{Int, Int}()
+    for (k, (vscc, _)) in enumerate(prepared), v in vscc
+        var_block[v] = k
+    end
+    dag = Graphs.SimpleDiGraph(n)
+    for (k, (_, escc)) in enumerate(prepared), ieq in escc, v in 𝑠neighbors(graph, ieq)
+        j = get(var_block, v, 0)
+        (j == 0 || j == k) && continue
+        Graphs.add_edge!(dag, j, k)
     end
 
-    groups = Vector{Int}[]
-    k = 1
-    while k <= n
-        if droppable[k]
-            j = k
-            while j + 1 <= n && droppable[j + 1] && coupled[j + 1]
-                j += 1
-            end
-            if j > k
-                push!(groups, collect(k:j))
-                k = j + 1
-                continue
+    bfs = function (sources, neighborfn)
+        seen = falses(n)
+        stack = collect(Int, sources)
+        seen[stack] .= true
+        while !isempty(stack)
+            u = pop!(stack)
+            for w in neighborfn(dag, u)
+                seen[w] && continue
+                seen[w] = true
+                push!(stack, w)
             end
         end
-        push!(groups, [k])
-        k += 1
+        return seen
     end
+
+    # Rank-deficible blocks that reach one another (possibly through intermediate blocks)
+    # belong to the same family.
+    dropidx = findall(droppable)
+    reach = Dict{Int, BitVector}(d => bfs((d,), Graphs.outneighbors) for d in dropidx)
+    conn = Graphs.SimpleGraph(n)
+    for d1 in dropidx, d2 in dropidx
+        d1 < d2 || continue
+        (reach[d1][d2] || reach[d2][d1]) && Graphs.add_edge!(conn, d1, d2)
+    end
+
+    # Close each family over the blocks on dependency paths between its members, so the
+    # merged system is self-contained. Closures of distinct families cannot overlap: a
+    # rank-deficible block on a path between two members is reachability-connected to
+    # them and thus in the same component, and a shared non-deficible block would chain
+    # the two components together.
+    family_of = zeros(Int, n)
+    nfam = 0
+    for comp in Graphs.connected_components(conn)
+        length(comp) > 1 || continue
+        closure = bfs(comp, Graphs.outneighbors) .& bfs(comp, Graphs.inneighbors)
+        nfam += 1
+        family_of[closure] .= nfam
+    end
+    iszero(nfam) && return singletons()
+
+    # Emit in a topological order of the DAG with each family contracted to one node.
+    # Families are path-closed, so the contraction cannot create cycles.
+    unit_id(k) = family_of[k] == 0 ? nfam + k : family_of[k]
+    unit_blocks = Dict{Int, Vector{Int}}()
+    for k in 1:n
+        push!(get!(Vector{Int}, unit_blocks, unit_id(k)), k)
+    end
+    indeg = Dict{Int, Int}(u => 0 for u in keys(unit_blocks))
+    outs = Dict{Int, Set{Int}}(u => Set{Int}() for u in keys(unit_blocks))
+    for e in Graphs.edges(dag)
+        uj = unit_id(Graphs.src(e))
+        uk = unit_id(Graphs.dst(e))
+        (uj == uk || uk in outs[uj]) && continue
+        push!(outs[uj], uk)
+        indeg[uk] += 1
+    end
+    # Kahn's algorithm, preferring the unit containing the smallest original block index
+    # to keep the emission order stable.
+    minidx = Dict{Int, Int}(u => first(bs) for (u, bs) in unit_blocks)
+    ready = [u for (u, d) in indeg if d == 0]
+    groups = Vector{Int}[]
+    while !isempty(ready)
+        bestpos = 1
+        for p in 2:length(ready)
+            minidx[ready[p]] < minidx[ready[bestpos]] && (bestpos = p)
+        end
+        u = ready[bestpos]
+        deleteat!(ready, bestpos)
+        push!(groups, unit_blocks[u])
+        for w in outs[u]
+            (indeg[w] -= 1) == 0 && push!(ready, w)
+        end
+    end
+    # Defensive: should the contracted graph somehow contain a cycle, Kahn's algorithm
+    # stalls before emitting every block; fall back to the default per-SCC blocks.
+    sum(length, groups; init = 0) == n || return singletons()
     return groups
 end
 
