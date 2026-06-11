@@ -440,14 +440,44 @@ end
 """
     $TYPEDSIGNATURES
 
-Structured, allocation-light canonical sort key for a variable: a tuple
-`(name, indices, opsig)` where `name` is the `Symbol` name of the (array)
-variable, `indices` are the integer indices when `v` is a scalarized array
-element (empty otherwise) and `opsig` encodes the operator chain wrapping the
-variable (`Differential` → `1`; `Shift` → `2` followed by its step count;
-any other operator → `3`). Comparing these tuples orders variables
-deterministically regardless of equation/declaration order, without
-stringifying symbolic expressions.
+Total, allocation-light "canonical name" for any expression that may appear in
+`fullvars`: the name for named variables (`Sym` / call-variable / `getindex`),
+the operation's name for operator/function applications, and a fixed sentinel
+symbol for the remaining structural variants. Key collisions are acceptable —
+they only mean the canonical tie-break falls back to the original order among
+the colliding entries.
+"""
+function canonical_name(x::SymbolicT)
+    @match x begin
+        BSImpl.Sym(; name) => name
+        BSImpl.Term(; f, args) && if f === getindex end => canonical_name(args[1])
+        BSImpl.Term(; f) => canonical_opname(f)
+        BSImpl.AddMul(; variant) => variant === SU.AddMulVariant.ADD ? :+ : :*
+        BSImpl.Div(;) => :/
+        BSImpl.ArrayOp(;) => Symbol("#arrayop")
+        BSImpl.Const(;) => Symbol("#const")
+        _ => Symbol("#expr")
+    end
+end
+function canonical_opname(@nospecialize(f))
+    f isa SymbolicT && return canonical_name(f)
+    f isa Function && return nameof(f)::Symbol
+    return nameof(typeof(f))::Symbol
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Structured canonical sort key for a `fullvars` entry: a tuple
+`(name, indices, opsig)` where `name` is the [`canonical_name`](@ref) of the
+underlying (array) variable, `indices` are the integer indices when `v` is a
+scalarized array element (empty otherwise) and `opsig` encodes the operator
+chain wrapping the variable (`Differential` → `1`; `Shift` → `2` followed by
+its step count; any other single-argument operator → `3`). Comparing these
+tuples orders variables deterministically regardless of equation/declaration
+order, without stringifying symbolic expressions. Total: compound expressions
+(e.g. multi-argument clock operators over non-variable arguments) key off
+their operation name.
 """
 function canonical_sort_key(v::SymbolicT)
     opsig = ()
@@ -482,7 +512,7 @@ function canonical_sort_key(v::SymbolicT)
         end
         _ => nothing
     end
-    return (getname(x)::Symbol, idxs, opsig)
+    return (canonical_name(x), idxs, opsig)
 end
 
 """
