@@ -11,6 +11,7 @@ import SymbolicUtils as SU
 using SymbolicUtils: unwrap
 using Setfield
 using ForwardDiff
+import SparseArrays
 
 @testset "`InferredDiscrete` validation" begin
     k = ShiftIndex()
@@ -169,6 +170,70 @@ end
             D(p) ~ 2y + 3w + z
         ], t
     ) reassemble_alg = MTKTearing.DefaultReassembleAlgorithm(; inline_linear_sccs = true)
+end
+
+@testset "`__reduce_linear_system!` preserves the full-system residual" begin
+    SymT = Symbolics.SymbolicT
+    MVT = StateSelection.MatchedVarT
+
+    # Build the 4×4 SCC described in issue #98's plan. Variables x1..x4, equations e1..e4:
+    #   e1:  2*x2              = 0        # eliminates x2 (matched, const coeffs)
+    #   e2:  -3*x2 + x3        = 0        # eliminates x3 via x2 -> transitive chain
+    #   e3:  x1 + x2 + x3 + x4 = p        # RETAINED, references two eliminated vars, symbolic RHS
+    #   e4:  x1 + x4           = p        # RETAINED, makes the reduced block rank-deficient
+    # Matching: x2->e1, x3->e2 (eliminated); x1,x4 unassigned => e3,e4 retained.
+    @variables p
+    mkA() = StateSelection.CLIL.SparseMatrixCLIL{Num, Int}(
+        4, 4, collect(1:4),
+        [[2], [2, 3], [1, 2, 3, 4], [1, 4]],
+        [Num[2.0], Num[-3.0, 1.0], Num[1.0, 1.0, 1.0, 1.0], Num[1.0, 1.0]])
+    mkb() = SymT[unwrap(Num(0)), unwrap(Num(0)), unwrap(p), unwrap(p)]
+    vem = BipartiteGraphs.complete(
+        BipartiteGraphs.Matching{MVT}(Union{MVT, Int}[BipartiteGraphs.unassigned, 1, 2, BipartiteGraphs.unassigned]),
+        4)
+
+    Ar, br, em, vm = MTKTearing.__reduce_linear_system!(mkA(), mkb(), vem, collect(1:4), collect(1:4))
+
+    @test em == Bool[0, 0, 1, 1]
+    @test vm == Bool[1, 0, 0, 1]
+
+    # The reduction is exact: x2=0, x3=0, so both retained rows become `x1 + x4 = p`.
+    subs = Dict{Any, Float64}(unwrap(p) => 3.7)
+    ev(x) = MTKTearing._evalnum(x, subs)
+    @test ev.(collect(Ar)) == [1.0 1.0; 1.0 1.0]   # rank-deficient (rank 1), as expected
+    @test ev.(br) ≈ [3.7, 3.7]                      # consistent: b in range(A)
+
+    # Exercise the opt-in self-check code path end-to-end (snapshot + identity + rank report).
+    local res
+    withenv("MTKTEARING_CHECK_REDUCTION" => "1") do
+        res = MTKTearing.__reduce_linear_system!(mkA(), mkb(), vem, collect(1:4), collect(1:4))
+    end
+    @test res[3] == Bool[0, 0, 1, 1]
+end
+
+@testset "`_reduction_identity_ok` detects reduction errors" begin
+    SymT2 = Symbolics.SymbolicT
+    @variables p
+    # Full 2×2 system: e1: 2*x1 = p (eliminate x1), e2: x1 + x2 = 0 (retain x2).
+    # Correct reduction: x1 = p/2, so e2 becomes x2 = -p/2.
+    A0 = Num[2.0 0.0; 1.0 1.0]
+    b0 = SymT2[unwrap(p), unwrap(Num(0))]
+    aliases = Dict{Int, SparseArrays.SparseVector{Num, Int}}(1 => SparseArrays.spzeros(Num, 2))
+    constants = Dict{Int, SymT2}(1 => unwrap(p / 2))
+    eqs_mask = BitVector([false, true])
+    vars_mask = BitVector([false, true])
+    old_to_new_eq = [0, 1]
+
+    A_red = Num[1.0;;]
+    b_red_good = SymT2[unwrap(-p / 2)]
+    @test MTKTearing._reduction_identity_ok(
+        A0, b0, A_red, b_red_good, aliases, constants, eqs_mask, vars_mask, old_to_new_eq)
+
+    # A wrong RHS (off by a constant) must be caught.
+    b_red_bad = SymT2[unwrap(-p / 2 + 1)]
+    bad = @test_logs (:warn,) match_mode = :any MTKTearing._reduction_identity_ok(
+        A0, b0, A_red, b_red_bad, aliases, constants, eqs_mask, vars_mask, old_to_new_eq)
+    @test bad == false
 end
 
 @testset "`system_subset(::SystemStructure)` subsets `.state_priorities`" begin
