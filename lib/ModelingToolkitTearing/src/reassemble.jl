@@ -769,7 +769,8 @@ _inline_scc_check_enabled() = !isempty(get(ENV, "MTKTEARING_CHECK_REDUCTION", ""
 # Numerically evaluate a symbolic expression under a substitution of *all* its free
 # symbols to numbers. Deliberately avoids `iszero`/`simplify`/`expand`, which can OOM
 # on large multibody coefficient expressions (see StateSelection.jl#95).
-_evalnum(x, subs::AbstractDict) = Float64(Symbolics.value(Symbolics.substitute(unwrap(x), subs)))
+_evalnum(x, subs::AbstractDict) =
+    Float64(Symbolics.value(Symbolics.substitute(unwrap(x), subs; fold = Val(true))))
 
 _free_syms_into!(s::AbstractSet, x) =
     (union!(s, Symbolics.get_variables(unwrap(x))); s)
