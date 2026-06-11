@@ -426,22 +426,15 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
     end
 
     digraph = DiCMOBiGraph{false}(graph, var_eq_matching)
-    for (i, scc) in enumerate(var_sccs)
-        # note that the `vscc <-> escc` relation is a set-to-set mapping, and not
-        # point-to-point.
-        vscc, escc = get_sorted_scc(digraph, full_var_eq_matching, var_eq_matching, scc)
-        var_sccs[i] = vscc
-        if length(escc) != length(vscc)
-            isempty(escc) && continue
-            escc = setdiff(escc, extra_eqs)
-            isempty(escc) && continue
-            vscc = setdiff(vscc, extra_vars)
-            isempty(vscc) && continue
-        end
 
+    # Emit one block (a single SCC, or the union of a jointly-solved family) as either an
+    # inline linear solve or, failing that, regular per-equation codegen. Returns `true`
+    # if the block was emitted; with `allow_regular = false` it emits only via the inline
+    # linear path and returns `false` when that path does not apply (so the caller can
+    # fall back to emitting the family's members individually).
+    emit_block! = function (vscc, escc; allow_regular::Bool = true)
         # Inline linear SCCs pass is only valid on continuous systems. We check if the
-        # current SCC is algebraic and if the algebraic equations are linear in the
-        # algebraic variables.
+        # block is algebraic and if the algebraic equations are linear in the variables.
         linsol_result = nothing
         if !is_disc && inline_linear_sccs
             linsol_result = get_linear_scc_linsol(state, escc, vscc, neweqs, var_eq_matching, total_sub, analytical_linear_scc_limit, simplify)
@@ -489,11 +482,59 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
                 var = eq_var_matching[ieq]::Int
                 codegen_equation!(eq_generator, neweqs[ieq], ieq, var; simplify)
             end
-        else
+            return true
+        elseif allow_regular
             for ieq in escc
                 iv = eq_var_matching[ieq]
                 neq = neweqs[ieq]
                 codegen_equation!(eq_generator, neq, ieq, iv; simplify)
+            end
+            return true
+        else
+            return false
+        end
+    end
+
+    # Sort each SCC (and trim the extra equations/variables) into the emittable blocks,
+    # preserving the block-triangular (topological) order.
+    prepared = NTuple{2, Vector{Int}}[]
+    for (i, scc) in enumerate(var_sccs)
+        # note that the `vscc <-> escc` relation is a set-to-set mapping, and not
+        # point-to-point.
+        vscc, escc = get_sorted_scc(digraph, full_var_eq_matching, var_eq_matching, scc)
+        var_sccs[i] = vscc
+        if length(escc) != length(vscc)
+            isempty(escc) && continue
+            escc = setdiff(escc, extra_eqs)
+            isempty(escc) && continue
+            vscc = setdiff(vscc, extra_vars)
+            isempty(vscc) && continue
+        end
+        push!(prepared, (vscc, escc))
+    end
+
+    # Group coupled, runtime-rank-deficible inline-linear SCCs into families that are
+    # solved jointly (issue #98): when a sequentially-solved block becomes rank-deficient
+    # at a degenerate parameter point, its gauge choice can make a downstream block
+    # inconsistent even though the union of the family's equations is satisfiable. Only
+    # active when `maybe_zeros` is set and inline linear SCCs are enabled, so the default
+    # behaviour (one block per SCC) is unchanged.
+    groups = _group_inline_linear_families(
+        prepared, MTKBase.maybe_zeros(state.sys), neweqs, graph, is_disc, inline_linear_sccs)
+
+    for grp in groups
+        if length(grp) == 1
+            vscc, escc = prepared[grp[1]]
+            emit_block!(vscc, escc)
+        else
+            vscc = reduce(vcat, (prepared[k][1] for k in grp))
+            escc = reduce(vcat, (prepared[k][2] for k in grp))
+            # Solve the family jointly; if the joint inline solve does not apply, fall
+            # back to emitting each member as its own block (original behaviour).
+            if !emit_block!(vscc, escc; allow_regular = false)
+                for k in grp
+                    emit_block!(prepared[k]...)
+                end
             end
         end
     end
@@ -536,6 +577,83 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
     neweqs = neweqs′
     return neweqs, solved_eqs, eq_ordering, var_ordering, length(solved_vars),
     length(solved_vars_set)
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Group the prepared inline-linear blocks (`prepared[k] = (vscc, escc)`, in block-triangular
+order) into families that should be solved jointly, returning a `Vector{Vector{Int}}` of
+index groups (each `[k]` is solved on its own; a multi-element group is solved as one joint
+linear system).
+
+The inline-linear-SCC pass solves blocks sequentially, substituting each block's solution
+into the downstream blocks. At a degenerate parameter point a block can become
+rank-deficient; its (gauge) solution choice is then substituted downstream and can make a
+dependent block inconsistent even though the *union* of the family's equations is
+satisfiable (issue #98). To avoid this we keep such a family unsubstituted and solve it as
+one block.
+
+A family is a maximal run of consecutive blocks that are (a) each *runtime-rank-deficible*
+— their equations reference a `maybe_zeros` parameter, so a coefficient can vanish and drop
+the rank — and (b) chained by structural coupling (each block's equations reference the
+previous block's variables). Blocks whose coefficients cannot vanish (e.g. a large
+full-rank chassis block) are never pulled in, and when `maybe_zeros` is empty no grouping
+happens at all, leaving the default one-block-per-SCC behaviour unchanged.
+"""
+function _group_inline_linear_families(
+        prepared::Vector{NTuple{2, Vector{Int}}}, maybe_zeros,
+        neweqs::Vector{Equation}, graph, is_disc::Bool, inline_linear_sccs::Bool)
+    n = length(prepared)
+    singletons() = [[k] for k in 1:n]
+    (is_disc || !inline_linear_sccs) && return singletons()
+    (maybe_zeros === nothing || isempty(maybe_zeros)) && return singletons()
+    mzs = collect(maybe_zeros)
+
+    references_maybe_zeros(ex) = any(Symbolics.get_variables(unwrap(ex))) do v
+        base = MTKBase.split_indexed_var(v)[1]
+        any(z -> isequal(base, unwrap(z)), mzs)
+    end
+    # A block's rank can drop iff one of its equations involves a `maybe_zeros` parameter.
+    droppable = falses(n)
+    for k in 1:n
+        _, escc = prepared[k]
+        droppable[k] = any(escc) do ieq
+            eq = neweqs[ieq]
+            res = SU._iszero(eq.lhs) ? eq.rhs : eq.rhs - eq.lhs
+            references_maybe_zeros(res)
+        end
+    end
+    # `coupled[k]`: block `k`'s equations structurally reference block `k-1`'s variables.
+    # Only relevant (and only worth the cost) between two rank-deficible blocks.
+    coupled = falses(n)
+    for k in 2:n
+        (droppable[k] && droppable[k - 1]) || continue
+        prev_vars = prepared[k - 1][1]
+        this_eqs = prepared[k][2]
+        coupled[k] = any(this_eqs) do ieq
+            any(v -> Graphs.has_edge(graph, BipartiteEdge(ieq, v)), prev_vars)
+        end
+    end
+
+    groups = Vector{Int}[]
+    k = 1
+    while k <= n
+        if droppable[k]
+            j = k
+            while j + 1 <= n && droppable[j + 1] && coupled[j + 1]
+                j += 1
+            end
+            if j > k
+                push!(groups, collect(k:j))
+                k = j + 1
+                continue
+            end
+        end
+        push!(groups, [k])
+        k += 1
+    end
+    return groups
 end
 
 const INLINE_LINEAR_SCC_OP = (\)
