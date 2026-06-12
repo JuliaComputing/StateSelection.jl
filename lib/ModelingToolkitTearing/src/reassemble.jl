@@ -426,22 +426,15 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
     end
 
     digraph = DiCMOBiGraph{false}(graph, var_eq_matching)
-    for (i, scc) in enumerate(var_sccs)
-        # note that the `vscc <-> escc` relation is a set-to-set mapping, and not
-        # point-to-point.
-        vscc, escc = get_sorted_scc(digraph, full_var_eq_matching, var_eq_matching, scc)
-        var_sccs[i] = vscc
-        if length(escc) != length(vscc)
-            isempty(escc) && continue
-            escc = setdiff(escc, extra_eqs)
-            isempty(escc) && continue
-            vscc = setdiff(vscc, extra_vars)
-            isempty(vscc) && continue
-        end
 
+    # Emit one block (a single SCC, or the union of a jointly-solved family) as either an
+    # inline linear solve or, failing that, regular per-equation codegen. Returns `true`
+    # if the block was emitted; with `allow_regular = false` it emits only via the inline
+    # linear path and returns `false` when that path does not apply (so the caller can
+    # fall back to emitting the family's members individually).
+    emit_block! = function (vscc, escc; allow_regular::Bool = true)
         # Inline linear SCCs pass is only valid on continuous systems. We check if the
-        # current SCC is algebraic and if the algebraic equations are linear in the
-        # algebraic variables.
+        # block is algebraic and if the algebraic equations are linear in the variables.
         linsol_result = nothing
         if !is_disc && inline_linear_sccs
             linsol_result = get_linear_scc_linsol(state, escc, vscc, neweqs, var_eq_matching, total_sub, analytical_linear_scc_limit, simplify)
@@ -489,11 +482,70 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
                 var = eq_var_matching[ieq]::Int
                 codegen_equation!(eq_generator, neweqs[ieq], ieq, var; simplify)
             end
-        else
+            return true
+        elseif allow_regular
             for ieq in escc
                 iv = eq_var_matching[ieq]
                 neq = neweqs[ieq]
                 codegen_equation!(eq_generator, neq, ieq, iv; simplify)
+            end
+            return true
+        else
+            # Inline path inapplicable: surface the reason (`NonlinearBlockEqs` carrying
+            # the offending equations, or `nothing`) so the caller can peel and retry.
+            return linsol_result
+        end
+    end
+
+    # Sort each SCC (and trim the extra equations/variables) into the emittable blocks,
+    # preserving the block-triangular (topological) order.
+    prepared = NTuple{2, Vector{Int}}[]
+    for (i, scc) in enumerate(var_sccs)
+        # note that the `vscc <-> escc` relation is a set-to-set mapping, and not
+        # point-to-point.
+        vscc, escc = get_sorted_scc(digraph, full_var_eq_matching, var_eq_matching, scc)
+        var_sccs[i] = vscc
+        if length(escc) != length(vscc)
+            isempty(escc) && continue
+            escc = setdiff(escc, extra_eqs)
+            isempty(escc) && continue
+            vscc = setdiff(vscc, extra_vars)
+            isempty(vscc) && continue
+        end
+        push!(prepared, (vscc, escc))
+    end
+
+    # Group coupled, runtime-rank-deficible inline-linear SCCs into families that are
+    # solved jointly (issue #98): when a sequentially-solved block becomes rank-deficient
+    # at a degenerate parameter point, its gauge choice can make a downstream block
+    # inconsistent even though the union of the family's equations is satisfiable. Only
+    # active when `maybe_zeros` is set and inline linear SCCs are enabled, so the default
+    # behaviour (one block per SCC) is unchanged.
+    groups = _group_inline_linear_families(
+        state, prepared, MTKBase.maybe_zeros(state.sys), neweqs, graph, is_disc, inline_linear_sccs)
+    if _famgrp_log_enabled()
+        fams = [grp for grp in groups if length(grp) > 1]
+        isempty(fams) || @info "Inline-linear-SCC families formed" nblocks=length(prepared) nfamilies=length(fams) family_equation_counts=[sum(length(prepared[k][2]) for k in grp) for grp in fams]
+    end
+    for grp in groups
+        if length(grp) == 1
+            vscc, escc = prepared[grp[1]]
+            emit_block!(vscc, escc)
+            continue
+        end
+        # Solve the family jointly. The grouping pre-screens members for linearity
+        # in the union's variables and keeps families path-closed (convex), so a
+        # failure here is rare (e.g. linearity lost through `total_sub`
+        # substitution); fall back to emitting each member as its own block.
+        vscc = reduce(vcat, (prepared[k][1] for k in grp))
+        escc = reduce(vcat, (prepared[k][2] for k in grp))
+        res = emit_block!(vscc, escc; allow_regular = false)
+        if res !== true
+            if _inline_scc_check_enabled()
+                @warn "Inline-linear-SCC family joint solve fell back to per-member emission" family_blocks=length(grp) reason=res
+            end
+            for k in grp
+                emit_block!(prepared[k]...)
             end
         end
     end
@@ -536,6 +588,280 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
     neweqs = neweqs′
     return neweqs, solved_eqs, eq_ordering, var_ordering, length(solved_vars),
     length(solved_vars_set)
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Group the prepared inline-linear blocks (`prepared[k] = (vscc, escc)`, in block-triangular
+order) into the units in which they are emitted, returning a `Vector{Vector{Int}}` of index
+groups in a valid (topological) emission order. Most groups are singletons `[k]`; a
+multi-element group is a *family* that must be solved as one joint linear system.
+
+The inline-linear-SCC pass solves blocks sequentially, substituting each block's solution
+into the downstream blocks. At a degenerate parameter point a block can become
+rank-deficient; its (gauge) solution choice is then substituted downstream and can make a
+dependent block inconsistent even though the *union* of the family's equations is
+satisfiable (issue #98). To avoid this we keep such families unsubstituted and solve each
+jointly.
+
+Families are computed on the block-level dependency DAG (edge `j → k` iff block `k`'s
+equations structurally reference block `j`'s variables; members of a family are typically
+*not* adjacent in the block-triangular order):
+
+1. A block is *runtime-rank-deficible* if its equations reference a `maybe_zeros`
+   parameter, so a coefficient can vanish at runtime and drop the rank.
+2. Rank-deficible blocks that reach each other through the DAG (possibly through
+   intermediate blocks) belong to the same family.
+3. Each family is closed over the blocks lying on dependency paths between its members, so
+   the merged system is self-contained: every variable it references is either solved
+   upstream or part of the merged block.
+
+The groups are returned in a topological order of the DAG with each family contracted to a
+single node (families are path-closed, so the contraction cannot create cycles). When
+`maybe_zeros` is empty no grouping happens at all, leaving the default one-block-per-SCC
+behaviour — including the emission order — unchanged.
+"""
+function _group_inline_linear_families(
+        state::TearingState, prepared::Vector{NTuple{2, Vector{Int}}}, maybe_zeros,
+        neweqs::Vector{Equation}, graph, is_disc::Bool, inline_linear_sccs::Bool)
+    n = length(prepared)
+    singletons() = [[k] for k in 1:n]
+    (is_disc || !inline_linear_sccs) && return singletons()
+    (maybe_zeros === nothing || isempty(maybe_zeros)) && return singletons()
+    mzs = collect(maybe_zeros)
+
+    references_maybe_zeros(ex) = any(Symbolics.get_variables(unwrap(ex))) do v
+        base = MTKBase.split_indexed_var(v)[1]
+        any(z -> isequal(base, unwrap(z)), mzs)
+    end
+    # A block's rank can drop iff one of its equations involves a `maybe_zeros` parameter.
+    droppable = falses(n)
+    for k in 1:n
+        _, escc = prepared[k]
+        droppable[k] = any(escc) do ieq
+            eq = neweqs[ieq]
+            res = SU._iszero(eq.lhs) ? eq.rhs : eq.rhs - eq.lhs
+            references_maybe_zeros(res)
+        end
+    end
+    any(droppable) || return singletons()
+
+    # Block-level dependency DAG: edge `j → k` iff block `k`'s equations structurally
+    # reference block `j`'s variables.
+    var_block = Dict{Int, Int}()
+    for (k, (vscc, _)) in enumerate(prepared), v in vscc
+        var_block[v] = k
+    end
+
+    # Whether all equations of block `b` are linear in every incident variable
+    # belonging to block `j` — i.e. whether `b` tolerates `j` in a jointly-solved
+    # linear family. Linearity is *set-dependent*: a block may be nonlinear in some
+    # other block's variables (e.g. cos of another block's angle) and still be
+    # perfectly linear in its own and its family's variables, so this is checked
+    # pairwise over a candidate family's closure rather than globally. Memoized.
+    (; fullvars, sys) = state
+    pairlinear_cache = Dict{Tuple{Int, Int}, Bool}()
+    blockpair_linear = function (b, j)
+        get!(pairlinear_cache, (b, j)) do
+            _, escc_b = prepared[b]
+            for ieq in escc_b
+                eq = neweqs[ieq]
+                res = SU._iszero(eq.lhs) ? eq.rhs : eq.rhs - eq.lhs
+                for v in 𝑠neighbors(graph, ieq)
+                    get(var_block, v, 0) == j || continue
+                    lex = MTKBase.get_linear_expander_for!(sys, fullvars[v], true)
+                    _, _, islin = lex(res)
+                    islin || return false
+                end
+            end
+            return true
+        end
+    end
+    closure_linear = function (cl)
+        for b in cl, j in cl
+            b == j && continue
+            blockpair_linear(b, j) || return false
+        end
+        return true
+    end
+    dag = Graphs.SimpleDiGraph(n)
+    for (k, (_, escc)) in enumerate(prepared), ieq in escc, v in 𝑠neighbors(graph, ieq)
+        j = get(var_block, v, 0)
+        (j == 0 || j == k) && continue
+        # Forward edges only: the prepared blocks are in BLT order, which is a valid
+        # linearization of the true (matching-based) dependencies. Raw residual
+        # incidence also contains backward references (e.g. through torn variables
+        # of later blocks); treating those as dependencies would make this graph
+        # cyclic even though sequential emission is perfectly well-defined.
+        j < k || continue
+        Graphs.add_edge!(dag, j, k)
+    end
+
+    bfs = function (sources, neighborfn)
+        seen = falses(n)
+        stack = collect(Int, sources)
+        seen[stack] .= true
+        while !isempty(stack)
+            u = pop!(stack)
+            for w in neighborfn(dag, u)
+                seen[w] && continue
+                seen[w] = true
+                push!(stack, w)
+            end
+        end
+        return seen
+    end
+
+    # Rank-deficible blocks that reach one another (possibly through intermediate blocks)
+    # belong to the same family.
+    dropidx = findall(droppable)
+    reach = Dict{Int, BitVector}(d => bfs((d,), Graphs.outneighbors) for d in dropidx)
+    conn = Graphs.SimpleGraph(n)
+    for d1 in dropidx, d2 in dropidx
+        d1 < d2 || continue
+        (reach[d1][d2] || reach[d2][d1]) && Graphs.add_edge!(conn, d1, d2)
+    end
+
+    # Close each family over the blocks on dependency paths between its members, so the
+    # merged system is self-contained. Closures of distinct families cannot overlap: a
+    # rank-deficible block on a path between two members is reachability-connected to
+    # them and thus in the same component, and a shared non-deficible block would chain
+    # the two components together.
+    # Full-graph BFS (ignores mergeability): used to compute the convex (path)
+    # closure of a candidate family in the *full* DAG. Convexity there is a
+    # correctness requirement — a family must absorb every block lying on a
+    # dependency path between its members, since such blocks both consume family
+    # outputs and feed family inputs, and a joint solve that treats them as
+    # external inputs would be circular.
+    bfs_full = function (sources, neighborfn)
+        seen = falses(n)
+        stack = collect(Int, sources)
+        seen[stack] .= true
+        while !isempty(stack)
+            u = pop!(stack)
+            for w in neighborfn(dag, u)
+                seen[w] && continue
+                seen[w] = true
+                push!(stack, w)
+            end
+        end
+        return seen
+    end
+    full_closure(members) = bfs_full(members, Graphs.outneighbors) .&
+                            bfs_full(members, Graphs.inneighbors)
+
+    family_of = zeros(Int, n)
+    nfam = 0
+    finalize_family! = function (cur)
+        length(cur) > 1 || return
+        closure = full_closure(cur)
+        # Closures of distinct families must not overlap (every block is emitted
+        # exactly once); skip if a previous family already claimed part of it.
+        if any(j -> family_of[j] != 0, findall(closure))
+            _famgrp_log_enabled() &&
+                println("FAMGREEDY family skipped (closure overlap): members=", cur)
+            return
+        end
+        nfam += 1
+        family_of[closure] .= nfam
+    end
+    for comp in Graphs.connected_components(conn)
+        length(comp) > 1 || continue
+        # Grow families greedily along the topological order: extend while the
+        # full-DAG closure of the candidate set remains entirely mergeable, so
+        # each finalized family is convex AND jointly linearly solvable. Members
+        # whose inclusion would drag in a non-mergeable block (e.g. the chassis
+        # block far downstream, with nonlinear kinematics on the intervening
+        # paths) start a new family instead.
+        members = sort(comp)
+        cur = Int[members[1]]
+        for m in Iterators.drop(members, 1)
+            cand = vcat(cur, m)
+            closure = full_closure(cand)
+            cl = findall(closure)
+            if all(k -> family_of[k] == 0, cl) && closure_linear(cl)
+                cur = cand
+            else
+                _famgrp_log_enabled() &&
+                    println("FAMGREEDY cannot extend ", cur, " by ", m, ": closure=", length(cl))
+                finalize_family!(cur)
+                cur = Int[m]
+            end
+        end
+        finalize_family!(cur)
+    end
+    _famgrp_log_enabled() &&
+        (println("FAMGREEDY formed nfam=", nfam, " sizes=", [count(==(f), family_of) for f in 1:nfam]); flush(stdout))
+    iszero(nfam) && return singletons()
+
+    # Emit in a topological order of the DAG with each family contracted to one node.
+    # Even disjoint convex families need not be mutually orderable: contracting two
+    # families that interleave in the block order can create a cycle through the
+    # blocks between them. When Kahn's algorithm stalls, dissolve one family that is
+    # stuck in the residual cycle and retry, keeping a maximal orderable subset.
+    while true
+        unit_id(k) = family_of[k] == 0 ? nfam + k : family_of[k]
+        unit_blocks = Dict{Int, Vector{Int}}()
+        for k in 1:n
+            push!(get!(Vector{Int}, unit_blocks, unit_id(k)), k)
+        end
+        indeg = Dict{Int, Int}(u => 0 for u in keys(unit_blocks))
+        outs = Dict{Int, Set{Int}}(u => Set{Int}() for u in keys(unit_blocks))
+        for e in Graphs.edges(dag)
+            uj = unit_id(Graphs.src(e))
+            uk = unit_id(Graphs.dst(e))
+            (uj == uk || uk in outs[uj]) && continue
+            push!(outs[uj], uk)
+            indeg[uk] += 1
+        end
+        # Kahn's algorithm, preferring the unit containing the smallest original block
+        # index to keep the emission order stable.
+        minidx = Dict{Int, Int}(u => first(bs) for (u, bs) in unit_blocks)
+        ready = [u for (u, d) in indeg if d == 0]
+        groups = Vector{Int}[]
+        emitted_units = Set{Int}()
+        while !isempty(ready)
+            bestpos = 1
+            for p in 2:length(ready)
+                minidx[ready[p]] < minidx[ready[bestpos]] && (bestpos = p)
+            end
+            u = ready[bestpos]
+            deleteat!(ready, bestpos)
+            push!(groups, unit_blocks[u])
+            push!(emitted_units, u)
+            for w in outs[u]
+                (indeg[w] -= 1) == 0 && push!(ready, w)
+            end
+        end
+        sum(length, groups; init = 0) == n && return groups
+        # Stalled: some families are part of a contracted cycle. Dissolve the stalled
+        # family with the largest first-block index (preserving the earliest ones).
+        stalled = [f for f in 1:nfam if !(f in emitted_units) && any(==(f), family_of)]
+        if isempty(stalled)
+            # Cycle without any family involved cannot happen on a BLT block list;
+            # be defensive anyway.
+            return singletons()
+        end
+        drop = argmax(f -> minidx[f], stalled)
+        _famgrp_log_enabled() &&
+            println("FAMGREEDY dissolving family ", drop, " (unorderable against earlier families)")
+        family_of[family_of .== drop] .= 0
+        any(!=(0), family_of) || return singletons()
+    end
+end
+
+"""
+    $TYPEDEF
+
+Returned by [`get_linear_scc_linsol`](@ref) instead of `nothing` when the inline
+linear solve is inapplicable because equations are nonlinear in the block's
+variables. Carries the global indices of all offending equations so a
+jointly-solved family can peel the member blocks owning them and retry in a
+single step (issue #98).
+"""
+struct NonlinearBlockEqs
+    ieqs::Vector{Int}
 end
 
 const INLINE_LINEAR_SCC_OP = (\)
@@ -591,12 +917,19 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
         b[eqidx] = resid
     end
 
+    bad_eqs = Int[]
     for (varidx, var) in enumerate(vars)
         lex = MTKBase.get_linear_expander_for!(sys, var, true)
         for (eqidx, resid) in enumerate(b)
             Graphs.has_edge(graph, BipartiteEdge(alg_eqs[eqidx], alg_vars[varidx])) || continue
+            alg_eqs[eqidx] in bad_eqs && continue
             p, q, islinear = lex(resid)
-            islinear || return nothing
+            if !islinear
+                # Record and keep scanning so a jointly-solved family can peel all
+                # offending member blocks in one step rather than one per retry.
+                push!(bad_eqs, alg_eqs[eqidx])
+                continue
+            end
             if !SU._iszero(p)
                 # We're iterating in increasing `varidx` (column index) so we can just `push!`
                 push!(A.row_cols[eqidx], varidx)
@@ -604,6 +937,51 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
             end
             b[eqidx] = q
         end
+    end
+    isempty(bad_eqs) || return NonlinearBlockEqs(bad_eqs)
+
+    # The `has_edge` gate above relies on the structural incidence `graph`, which is
+    # mutated during reassembly and can desync from the `total_sub`-substituted residual.
+    # A false-negative edge leaves a live SCC variable buried inside `b[eqidx]`; if that
+    # row is later eliminated by `__reduce_linear_system!` (which only inspects the
+    # coefficient row, never `b`), the buried variable is smuggled onto the RHS of
+    # retained equations, producing an inconsistent runtime `A \ b` (issue #98). Restore
+    # the invariant "`b` is free of all SCC variables" by re-expanding any leftover term.
+    var_atoms = [Set{Any}(Symbolics.get_variables(unwrap(var))) for var in vars]
+    scc_atoms = union(Set{Any}(), var_atoms...)
+    repaired = 0
+    if !isempty(scc_atoms)
+        for eqidx in 1:N
+            bsyms = Symbolics.get_variables(unwrap(b[eqidx]))
+            any(in(scc_atoms), bsyms) || continue
+            present = Set(A.row_cols[eqidx])
+            did_repair = false
+            for (varidx, var) in enumerate(vars)
+                varidx in present && continue
+                # Only invoke the (cached) expander if this variable actually occurs.
+                isempty(intersect(var_atoms[varidx], bsyms)) && continue
+                lex = MTKBase.get_linear_expander_for!(sys, var, true)
+                p, q, islinear = lex(b[eqidx])
+                islinear || return NonlinearBlockEqs([alg_eqs[eqidx]])
+                b[eqidx] = q
+                if !SU._iszero(p)
+                    push!(A.row_cols[eqidx], varidx)
+                    push!(A.row_vals[eqidx], p)
+                    did_repair = true
+                end
+                bsyms = Symbolics.get_variables(unwrap(b[eqidx]))
+            end
+            if did_repair
+                # The re-expanded columns may be out of order; `A.row_cols` must be sorted.
+                perm = sortperm(A.row_cols[eqidx])
+                A.row_cols[eqidx] = A.row_cols[eqidx][perm]
+                A.row_vals[eqidx] = A.row_vals[eqidx][perm]
+                repaired += 1
+            end
+        end
+    end
+    if repaired > 0 && _inline_scc_check_enabled()
+        @info "Inline-linear-SCC construction re-expanded buried SCC variables in `b`" block_n=N repaired_equations=repaired alg_vars
     end
 
     # `-` is important! `b` is on the other side of the equality.
@@ -706,8 +1084,150 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
     return (INLINE_LINEAR_SCC_OP(A, b), eqs_mask, vars_mask)
 end
 
+# ---------------------------------------------------------------------------
+# Opt-in self-checks for the inline-linear-SCC pass (issue #98).
+#
+# These are disabled unless the `MTKTEARING_CHECK_REDUCTION` environment variable
+# is set to a non-empty value. When off, the only added cost is a single `get(ENV,
+# ...)` per SCC and the snapshots below are skipped, so production pays nothing.
+# ---------------------------------------------------------------------------
+
+"""
+    $TYPEDSIGNATURES
+
+Whether the inline-linear-SCC self-checks are enabled. Controlled by the
+`MTKTEARING_CHECK_REDUCTION` environment variable (any non-empty value enables it).
+"""
+_inline_scc_check_enabled() = !isempty(get(ENV, "MTKTEARING_CHECK_REDUCTION", ""))
+# Separate, cheap gate for family-grouping progress logging (no snapshots/rank checks).
+_famgrp_log_enabled() = _inline_scc_check_enabled() || !isempty(get(ENV, "MTKT_FAMGRP_LOG", ""))
+
+# Numerically evaluate a symbolic expression under a substitution of *all* its free
+# symbols to numbers. Deliberately avoids `iszero`/`simplify`/`expand`, which can OOM
+# on large multibody coefficient expressions (see StateSelection.jl#95).
+_evalnum(x, subs::AbstractDict) =
+    Float64(Symbolics.value(Symbolics.substitute(unwrap(x), subs; fold = Val(true))))
+
+_free_syms_into!(s::AbstractSet, x) =
+    (union!(s, Symbolics.get_variables(unwrap(x))); s)
+
+# Build a deterministic random substitution for all free symbols appearing in the
+# given symbolic containers, plus an RNG seeded from the symbol *names* (so a reported
+# failure reproduces across runs). Returns `(subs, rng)`.
+function _deterministic_subs(containers...)
+    syms = Set{Any}()
+    for c in containers, x in c
+        _free_syms_into!(syms, x)
+    end
+    symvec = sort!(collect(syms); by = string)
+    seed = foldl((h, s) -> hash(string(s), h), symvec; init = UInt(0x5eed))
+    rng = Random.MersenneTwister(seed % typemax(UInt) + one(UInt))
+    # Bounded draws in (0.15, 0.85): generic enough for rank/identity probing while
+    # keeping common expression domains valid (sqrt(1 - x^2), log(x), 1/x, ...).
+    # Array-shaped symbols get an array of draws so indexing still folds.
+    draw() = 0.15 + 0.7 * rand(rng)
+    subs = Dict{Any, Any}()
+    for s in symvec
+        sh = SU.shape(unwrap(s))
+        if sh isa SU.Unknown || isempty(sh)
+            subs[s] = draw()
+        else
+            dims = map(length, Tuple(sh))
+            subs[s] = [draw() for _ in CartesianIndices(dims)]
+        end
+    end
+    return subs, rng
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Verify that the reduced linear system `A_red x_ret = b_red` produced by
+`__reduce_linear_system!` is the *exact* substitution-projection of the full system
+`A0 x = b0`, i.e. for every retained equation the reduced residual equals the full
+residual after replacing each eliminated variable `v` by `aliases[v]·x_ret +
+constants[v]`. Returns `true` iff the identity holds at a deterministic pseudo-random
+probe point. Pure and positional: it does not need to know which symbols are the SCC
+variables (those are represented by column position, not as free symbols).
+"""
+function _reduction_identity_ok(
+        A0::AbstractMatrix, b0::AbstractVector, A_red::AbstractMatrix, b_red::AbstractVector,
+        aliases::AbstractDict, constants::AbstractDict, eqs_mask::BitVector,
+        vars_mask::BitVector, old_to_new_eq::Vector{Int}; rtol::Float64 = 1e-7)
+    N = length(b0)
+    aliasvals = (SparseArrays.nonzeros(sv) for sv in values(aliases))
+    subs, rng = _deterministic_subs(A0, b0, A_red, b_red, values(constants), aliasvals...)
+
+    # New index of each retained variable (mirrors `cumsum(vars_mask)` in the caller).
+    old_to_new_var = zeros(Int, N)
+    let c = 0
+        for j in 1:N
+            vars_mask[j] || continue
+            old_to_new_var[j] = (c += 1)
+        end
+    end
+    nret = count(vars_mask)
+    xret = randn(rng, nret)
+
+    # Full-length solution: retained vars from `xret`, eliminated vars from their alias.
+    xfull = Vector{Float64}(undef, N)
+    for j in 1:N
+        vars_mask[j] && (xfull[j] = xret[old_to_new_var[j]])
+    end
+    for j in 1:N
+        vars_mask[j] && continue
+        acc = _evalnum(constants[j], subs)
+        I, V = SparseArrays.findnz(aliases[j])
+        for (k, coeff) in zip(I, V)
+            # After Phase-2 flattening, `k` references only retained variables.
+            acc += _evalnum(coeff, subs) * xfull[k]
+        end
+        xfull[j] = acc
+    end
+
+    nr = length(b_red)
+    ok = true
+    for i in 1:N
+        eqs_mask[i] || continue
+        ired = old_to_new_eq[i]
+        rfull = sum(_evalnum(A0[i, j], subs) * xfull[j] for j in 1:N; init = 0.0) - _evalnum(b0[i], subs)
+        rred = sum(_evalnum(A_red[ired, j], subs) * xret[j] for j in 1:nr; init = 0.0) - _evalnum(b_red[ired], subs)
+        if abs(rfull - rred) > rtol * (1 + abs(rfull))
+            ok = false
+            @warn "Inline-linear-SCC reduction identity violated" full_row=i reduced_row=ired residual_full=rfull residual_reduced=rred mismatch=abs(rfull - rred)
+        end
+    end
+    return ok
+end
+
+# Report the rank/consistency of the full and reduced blocks at a deterministic probe
+# point. Distinguishes "full block already bad (upstream construction)" from "reduction
+# broke it". Logs via `@info`; only called when the self-check is enabled.
+function _reduction_rank_report(A0::AbstractMatrix, b0::AbstractVector,
+        A_red::AbstractMatrix, b_red::AbstractVector, alg_vars::Vector{Int})
+    subs, _ = _deterministic_subs(A0, b0, A_red, b_red)
+    N = length(b0)
+    A0n = [_evalnum(A0[i, j], subs) for i in 1:N, j in 1:N]
+    b0n = [_evalnum(b0[i], subs) for i in 1:N]
+    nr = length(b_red)
+    Arn = [_evalnum(A_red[i, j], subs) for i in 1:nr, j in 1:nr]
+    brn = [_evalnum(b_red[i], subs) for i in 1:nr]
+    # Rank-tolerant residual: min-norm least-squares via the pseudoinverse, so a
+    # (legitimately) rank-deficient block does not throw and we can still tell whether
+    # `b` lies in the range of `A` (relres ≈ 0 consistent, relres ≈ 1 inconsistent).
+    relres(A, b) = isempty(b) ? 0.0 : LinearAlgebra.norm(A * (LinearAlgebra.pinv(A) * b) - b) / max(LinearAlgebra.norm(b), eps())
+    consistent(A, b) = LinearAlgebra.rank(A) == LinearAlgebra.rank(hcat(A, b))
+    @info "Inline-linear-SCC block diagnostics" alg_vars full_n=N full_rank=LinearAlgebra.rank(A0n) full_consistent=consistent(A0n, b0n) full_relres=relres(A0n, b0n) reduced_n=nr reduced_rank=(nr == 0 ? 0 : LinearAlgebra.rank(Arn)) reduced_consistent=(nr == 0 ? true : consistent(Arn, brn)) reduced_relres=relres(Arn, brn)
+    return nothing
+end
+
 function __reduce_linear_system!(A::StateSelection.CLIL.SparseMatrixCLIL{Num, Int}, b::Vector{SymbolicT}, var_eq_matching::StateSelection.VarEqMatchingT, alg_eqs::Vector{Int}, alg_vars::Vector{Int})
     N = length(b)
+    # Snapshot the pre-reduction system for the opt-in self-check. `A`'s rows are
+    # mutated in place below and `b` is reassigned, so these must be copies.
+    _check = _inline_scc_check_enabled()
+    A0_check = _check ? collect(A)::Matrix{Num} : nothing
+    b0_check = _check ? copy(b) : nothing
     # Identify rows (equations) not worth involving in the linear solve.
     #
     # The current heuristic is to find all rows with constant coefficients
@@ -816,6 +1336,23 @@ function __reduce_linear_system!(A::StateSelection.CLIL.SparseMatrixCLIL{Num, In
     old_to_new_eq = cumsum(eqs_mask)
     old_to_new_eq[.!eqs_mask] .= 0
     A = StateSelection.get_new_mm(aliases, old_to_new_eq, old_to_new_var, A)
+
+    if _check
+        # Best-effort diagnostics: a probe point can still violate an expression's
+        # domain (e.g. sqrt of a negative subexpression); skip rather than abort.
+        try
+            A_red_check = collect(A)::Matrix{Num}
+            _reduction_identity_ok(A0_check, b0_check, A_red_check, b, aliases, constants,
+                                   eqs_mask, vars_mask, old_to_new_eq)
+            _reduction_rank_report(A0_check, b0_check, A_red_check, b, alg_vars)
+        catch err
+            err isa InterruptException && rethrow()
+            # The self-check is best-effort, opt-in diagnostics; a probe point can
+            # violate an expression's domain or an exotic term can resist numeric
+            # evaluation. Skip rather than abort compilation.
+            @warn "Inline-linear-SCC self-check skipped" block_n=length(b0_check) exception=err
+        end
+    end
 
     return A, b, eqs_mask, vars_mask
 end
