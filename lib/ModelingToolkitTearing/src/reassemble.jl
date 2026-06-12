@@ -523,7 +523,7 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
     # behaviour (one block per SCC) is unchanged.
     groups = _group_inline_linear_families(
         state, prepared, MTKBase.maybe_zeros(state.sys), neweqs, graph, is_disc, inline_linear_sccs)
-    if _inline_scc_check_enabled()
+    if _famgrp_log_enabled()
         fams = [grp for grp in groups if length(grp) > 1]
         isempty(fams) || @info "Inline-linear-SCC families formed" nblocks=length(prepared) nfamilies=length(fams) family_equation_counts=[sum(length(prepared[k][2]) for k in grp) for grp in fams]
     end
@@ -759,7 +759,7 @@ function _group_inline_linear_families(
         # Closures of distinct families must not overlap (every block is emitted
         # exactly once); skip if a previous family already claimed part of it.
         if any(j -> family_of[j] != 0, findall(closure))
-            _inline_scc_check_enabled() &&
+            _famgrp_log_enabled() &&
                 println("FAMGREEDY family skipped (closure overlap): members=", cur)
             return
         end
@@ -783,7 +783,7 @@ function _group_inline_linear_families(
             if all(k -> family_of[k] == 0, cl) && closure_linear(cl)
                 cur = cand
             else
-                _inline_scc_check_enabled() &&
+                _famgrp_log_enabled() &&
                     println("FAMGREEDY cannot extend ", cur, " by ", m, ": closure=", length(cl))
                 finalize_family!(cur)
                 cur = Int[m]
@@ -791,8 +791,8 @@ function _group_inline_linear_families(
         end
         finalize_family!(cur)
     end
-    _inline_scc_check_enabled() &&
-        println("FAMGREEDY formed nfam=", nfam, " sizes=", [count(==(f), family_of) for f in 1:nfam])
+    _famgrp_log_enabled() &&
+        (println("FAMGREEDY formed nfam=", nfam, " sizes=", [count(==(f), family_of) for f in 1:nfam]); flush(stdout))
     iszero(nfam) && return singletons()
 
     # Emit in a topological order of the DAG with each family contracted to one node.
@@ -844,7 +844,7 @@ function _group_inline_linear_families(
             return singletons()
         end
         drop = argmax(f -> minidx[f], stalled)
-        _inline_scc_check_enabled() &&
+        _famgrp_log_enabled() &&
             println("FAMGREEDY dissolving family ", drop, " (unorderable against earlier families)")
         family_of[family_of .== drop] .= 0
         any(!=(0), family_of) || return singletons()
@@ -1099,6 +1099,8 @@ Whether the inline-linear-SCC self-checks are enabled. Controlled by the
 `MTKTEARING_CHECK_REDUCTION` environment variable (any non-empty value enables it).
 """
 _inline_scc_check_enabled() = !isempty(get(ENV, "MTKTEARING_CHECK_REDUCTION", ""))
+# Separate, cheap gate for family-grouping progress logging (no snapshots/rank checks).
+_famgrp_log_enabled() = _inline_scc_check_enabled() || !isempty(get(ENV, "MTKT_FAMGRP_LOG", ""))
 
 # Numerically evaluate a symbolic expression under a substitution of *all* its free
 # symbols to numbers. Deliberately avoids `iszero`/`simplify`/`expand`, which can OOM
