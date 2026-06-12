@@ -1221,6 +1221,23 @@ function _reduction_rank_report(A0::AbstractMatrix, b0::AbstractVector,
     return nothing
 end
 
+
+# Memoized unique-node count of a symbolic expression DAG, with early abort once
+# `budget` is exceeded (returns a value > budget in that case). Used to bound the
+# size of composed elimination expressions in `__reduce_linear_system!`.
+function _node_count_capped(x, budget::Int, seen::IdDict{Any, Nothing} = IdDict{Any, Nothing}())
+    x = unwrap(x)
+    SU.iscall(x) || return 1
+    haskey(seen, x) && return 0
+    seen[x] = nothing
+    n = 1
+    for a in SU.arguments(x)
+        n += _node_count_capped(a, budget, seen)
+        n > budget && return n
+    end
+    return n
+end
+
 function __reduce_linear_system!(A::StateSelection.CLIL.SparseMatrixCLIL{Num, Int}, b::Vector{SymbolicT}, var_eq_matching::StateSelection.VarEqMatchingT, alg_eqs::Vector{Int}, alg_vars::Vector{Int})
     N = length(b)
     # Snapshot the pre-reduction system for the opt-in self-check. `A`'s rows are
@@ -1241,75 +1258,89 @@ function __reduce_linear_system!(A::StateSelection.CLIL.SparseMatrixCLIL{Num, In
     # `∑_k aliases[i][k] * fullvars[alg_vars[k]] + constants[i]`
     constants = Dict{Int, SymbolicT}()
     aliases = Dict{Int, SparseArrays.SparseVector{Num, Int}}()
+    # Pass 1: collect elimination candidates. A matched row is a candidate when its
+    # PIVOT coefficient is a known-nonzero constant; off-pivot coefficients may be
+    # symbolic and fold into the alias expression (StateSelection.jl#95). Requiring
+    # the whole row to be constant (the previous gate) keeps hundreds of
+    # sequentially-solvable rows inside the numeric solve.
+    cand_row = Dict{Int, Int}()   # ivar => row index i
+    cand_piv = Dict{Int, Num}()   # ivar => pivot coefficient
     for (i, coeffs) in enumerate(A.row_vals)
-        all(SU.isconst ∘ unwrap, coeffs) || continue
         eq_var_matching[alg_eqs[i]] isa Int || continue
-
-        eqs_mask[i] = false
         var = eq_var_matching[alg_eqs[i]]::Int
-        ivar = var_to_idx[var]
-        vars_mask[ivar] = false
-        new_N -= 1
-
-        eqvars = A.row_cols[i]
-        idx_in_eq = findfirst(isequal(ivar), eqvars)::Int
-        var_coeff = coeffs[idx_in_eq]
-        deleteat!(eqvars, idx_in_eq)
-        deleteat!(coeffs, idx_in_eq)
-        # Negation to move variables to the other side of the equality
-        coeffs ./= -var_coeff
-        aliases[ivar] = SparseArrays.SparseVector(N, eqvars, coeffs)
-        # `b` is already on the other side of the equality
-        constants[ivar] = b[i] / var_coeff
+        ivar = get(var_to_idx, var, nothing)
+        ivar === nothing && continue
+        idx_in_eq = findfirst(isequal(ivar), A.row_cols[i])
+        idx_in_eq === nothing && continue
+        var_coeff = A.row_vals[i][idx_in_eq]
+        SU.isconst(unwrap(var_coeff)) || continue
+        SU._iszero(unwrap(var_coeff)) && continue
+        cand_row[ivar] = i
+        cand_piv[ivar] = var_coeff
     end
 
-    # We could have eliminated a variable in terms of other eliminated variables. While
-    # `get_new_mm` can handle this, it makes updating `b` much more difficult. We can
-    # topologically sort the dependency graph and use this information to update `aliases`
-    # and `constants` to fix this issue.
+    # Pass 2: topologically order the candidates along their dependency DAG (a
+    # candidate row may reference other candidate variables; tearing guarantees
+    # acyclicity).
     dep_graph = Graphs.SimpleDiGraph(length(alg_vars))
-    for (var, coeffs) in aliases
-        I, _ = SparseArrays.findnz(coeffs)
-        for other_var in I
-            # Avoid unnecessary edges.
-            haskey(aliases, other_var) || continue
-            # Edge from dependency to dependent
-            Graphs.add_edge!(dep_graph, other_var, var)
+    for (ivar, i) in cand_row
+        for other in A.row_cols[i]
+            other == ivar && continue
+            haskey(cand_row, other) || continue
+            Graphs.add_edge!(dep_graph, other, ivar)
         end
     end
-
-    # We know there won't be cycles because we're using the results of tearing, which
-    # partitioned this SCC into a lower
     var_order = Graphs.topological_sort(dep_graph)
-    for var in var_order
-        haskey(aliases, var) || continue
-        iszero(Graphs.indegree(dep_graph, var)) && continue
-        coeffs = aliases[var]
-        cst = constants[var]
-        I, V = SparseArrays.findnz(coeffs)
 
+    # Pass 3: greedy commit in topological order, composing references to already
+    # eliminated variables inline so committed aliases are always closed over
+    # retained variables. A variable whose composed expression exceeds the node
+    # budget stays in the numeric core — this bounds symbolic growth (the failure
+    # mode reported in StateSelection.jl#95) while still eliminating the cheap
+    # sequential rows.
+    elim_budget = something(tryparse(Int, get(ENV, "MTKTEARING_ELIM_SIZE_BUDGET", "")), 1000)
+    for ivar in var_order
+        i = get(cand_row, ivar, nothing)
+        i === nothing && continue
+        var_coeff = cand_piv[ivar]
         new_I = Int[]
         new_V = Num[]
-        sizehint!(new_I, length(I))
-        sizehint!(new_V, length(V))
-        for (other_var, coeff) in zip(I, V)
-            other_coeffs = get(aliases, other_var, nothing)
-            if other_coeffs === nothing
-                push!(new_I, other_var)
-                push!(new_V, coeff)
-                continue
+        cst = b[i] / var_coeff
+        for (other, coeff) in zip(A.row_cols[i], A.row_vals[i])
+            other == ivar && continue
+            c = coeff / (-var_coeff)
+            other_alias = get(aliases, other, nothing)
+            if other_alias === nothing
+                push!(new_I, other)
+                push!(new_V, c)
+            else
+                oI, oV = SparseArrays.findnz(other_alias)
+                append!(new_I, oI)
+                append!(new_V, Iterators.map(Base.Fix2(*, c), oV))
+                cst += c * constants[other]
             end
-            other_coeffs = other_coeffs::valtype(aliases)
-            other_cst = constants[other_var]
-            other_I, other_V = SparseArrays.findnz(other_coeffs)
-            append!(new_I, other_I)
-            append!(new_V, Iterators.map(Base.Fix2(*, coeff), other_V))
-            cst += coeff * other_cst
         end
+        sv = SparseArrays.sparsevec(new_I, new_V, N)
+        svI, svV = SparseArrays.findnz(sv)
+        keep = findall(!StateSelection.CLIL.cheap_iszero, svV)
+        svI = svI[keep]; svV = svV[keep]
+        # Budget check over the composed coefficients and constant (shared DAG
+        # nodes counted once via the common `seen` set).
+        seen = IdDict{Any, Nothing}()
+        sz = _node_count_capped(cst, elim_budget, seen)
+        if sz <= elim_budget
+            for v in svV
+                sz += _node_count_capped(v, elim_budget, seen)
+                sz > elim_budget && break
+            end
+        end
+        sz > elim_budget && continue   # too big: keep this variable in the core
 
-        # `sparsevec` sums duplicate indices but keeps explicit zeros; drop them.
-        aliases[var] = SparseArrays.dropzeros!(SparseArrays.sparsevec(new_I, new_V, length(coeffs)))
-        constants[var] = cst
+        eqs_mask[i] = false
+        vars_mask[ivar] = false
+        new_N -= 1
+        aliases[ivar] = SparseArrays.sparsevec(svI, svV, N)
+        constants[ivar] = cst
     end
 
     # First we update `b`, since doing so requires the unmodified `A`.
