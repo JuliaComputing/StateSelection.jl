@@ -118,6 +118,50 @@ function Base.push!(ev::EquationsView, eq)
     push!(ev.ts.extra_eqs, eq)
 end
 
+"""
+    $TYPEDEF
+
+Thrown by [`BoundedIO`](@ref) when the byte limit is reached.
+"""
+struct BoundedIOOverflow <: Exception end
+
+"""
+    $TYPEDEF
+
+An `IO` wrapper that throws [`BoundedIOOverflow`](@ref) once more than
+`remaining` bytes have been written to it. Printing a symbolic expression
+produces output proportional to its *tree* size, which is exponential in the
+sharing depth of the hash-consed DAG; since printing streams depth-first,
+aborting after a bounded number of bytes also bounds the traversal work.
+"""
+mutable struct BoundedIO{T <: IO} <: IO
+    io::T
+    remaining::Int
+end
+
+function Base.write(io::BoundedIO, b::UInt8)
+    io.remaining <= 0 && throw(BoundedIOOverflow())
+    io.remaining -= 1
+    return write(io.io, b)
+end
+
+"""
+    $TYPEDSIGNATURES
+
+`string(x)`, truncated to at most `limit` bytes of output. The truncation also
+bounds the printing work, making this safe to call on expressions whose full
+printed form would be astronomically large.
+"""
+function bounded_string(x, limit::Int)
+    buf = IOBuffer(; sizehint = limit)
+    try
+        print(BoundedIO(buf, limit), x)
+    catch err
+        err isa BoundedIOOverflow || rethrow()
+    end
+    return String(take!(buf))
+end
+
 function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationSourceInformation} = nothing; check::Bool = true, sort_eqs::Bool = true)
     # flatten system
     if source_info === nothing
@@ -365,8 +409,12 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
 
     if sort_eqs
         # sort equations lexicographically to reduce simplification issues
-        # depending on order due to NP-completeness of tearing.
-        sortidxs = Base.sortperm(string.(eqs)) # "by = string" creates more strings
+        # depending on order due to NP-completeness of tearing. Sort on a
+        # bounded prefix of the printed form: the full `string` of an equation
+        # is exponential in the sharing depth of hash-consed expressions, and
+        # ties on the first 4096 bytes keep their original (deterministic)
+        # relative order since the default sort is stable.
+        sortidxs = Base.sortperm(map(Base.Fix2(bounded_string, 4096), eqs))
         eqs = eqs[sortidxs]
         original_eqs = original_eqs[sortidxs]
         symbolic_incidence = symbolic_incidence[sortidxs]

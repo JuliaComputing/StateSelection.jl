@@ -209,6 +209,55 @@ function query_any_vars(state::TearingState, denom::Union{SymbolicT, AbstractArr
     end
 end
 
+const _DEFAULTS_SUBST_CACHE = Ref{Tuple{Any, Any}}((nothing, nothing))
+
+"""
+    $TYPEDSIGNATURES
+
+The default-value substitution for parameters of `sys`, merging `bindings` and
+`initial_conditions`. Cached for the most recently queried system, since this
+is consulted once per solvable-edge candidate.
+"""
+function _defaults_substitution(sys)
+    cached_sys, cached = _DEFAULTS_SUBST_CACHE[]
+    cached_sys === sys && return cached::Dict{SymbolicT, Any}
+    dict = Dict{SymbolicT, Any}()
+    for src in (MTKBase.bindings(sys), MTKBase.initial_conditions(sys))
+        for (k, v) in src
+            v === nothing && continue
+            k = unwrap(k)
+            haskey(dict, k) || (dict[k] = v)
+        end
+    end
+    _DEFAULTS_SUBST_CACHE[] = (sys, dict)
+    return dict
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Check if `denom` evaluates to literal zero when all parameters take their
+default values. Symbolically-nonzero parameter expressions like a joint axis
+component `n[3]` with `n = [0, 1, 0]` are invalid divisors for the default
+parameterization even though they pass the structural checks.
+"""
+function _is_zero_at_defaults(state::TearingState, denom::SymbolicT)
+    defs = _defaults_substitution(state.sys)
+    isempty(defs) && return false
+    val = try
+        Symbolics.fixpoint_sub(denom, defs)
+    catch
+        return false
+    end
+    val = unwrap(val)
+    SU.isconst(val) || return false
+    v = SU.unwrap_const(val)
+    return v isa Number && iszero(v)
+end
+# Dense matrices legitimately contain zero entries; only scalar divisors are
+# checked.
+_is_zero_at_defaults(::TearingState, ::AbstractArray) = false
+
 """
     $TYPEDSIGNATURES
 
@@ -231,6 +280,8 @@ function _check_allow_symbolic_parameter(
         query_maybe_zeros(MaybeZeroQueryFn(maybe_zeros), denom) && return false
 
         query_any_vars(state, denom, fullvars_set) && return false
+
+        _is_zero_at_defaults(state, denom) && return false
     end
     return true
 end
@@ -249,7 +300,14 @@ function StateSelection.find_eq_solvables!(state::TearingState, ieq, to_rm = Int
     (; graph, solvable_graph) = state.structure
 
     eq = equations(state)[ieq]
-    term = unwrap(eq.rhs - eq.lhs)
+    term = try
+        unwrap(eq.rhs - eq.lhs)
+    catch
+        # `bounded_string`: printing full expressions can be exponential in
+        # the sharing depth of the hash-consed DAG.
+        @error "find_eq_solvables! failed to form the residual of equation $ieq" lhs_symtype=SU.symtype(unwrap(eq.lhs)) rhs_symtype=SU.symtype(unwrap(eq.rhs)) lhs=bounded_string(eq.lhs, 500) rhs=bounded_string(eq.rhs, 500)
+        rethrow()
+    end
     all_int_vars = true
     coeffs === nothing || empty!(coeffs)
     empty!(to_rm)

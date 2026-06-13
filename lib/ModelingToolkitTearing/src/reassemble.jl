@@ -611,7 +611,8 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
         b[i] = -b[i]
     end
 
-    A, b, eqs_mask, vars_mask = __reduce_linear_system!(A, b, var_eq_matching, alg_eqs, alg_vars)
+    A, b, eqs_mask, vars_mask = __reduce_linear_system!(
+        A, b, var_eq_matching, alg_eqs, alg_vars, state; allow_symbolic, allow_parameter)
 
     N = length(b)
     A = collect(A)::Matrix{Num}
@@ -703,18 +704,34 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
     b = SU.Code.with_allocator(b_allocator, SU.Const{VartypeT}(b))
     state.sys = sys
 
-    return (INLINE_LINEAR_SCC_OP(A, b), eqs_mask, vars_mask)
+    # Build the `\` term for its type/shape promotion, then swap the operation
+    # for the NaN-propagating variant: initialization reconstruction evaluates
+    # observed chains with NaN sentinels, on which `lu` inside `\` throws.
+    ldiv_term = INLINE_LINEAR_SCC_OP(A, b)
+    linsol = Symbolics.STerm(
+        MTKBase.nan_safe_ldiv, Symbolics.SArgsT((A, b));
+        type = SU.symtype(ldiv_term), shape = SU.shape(ldiv_term)
+    )
+    return (linsol, eqs_mask, vars_mask)
 end
 
-function __reduce_linear_system!(A::StateSelection.CLIL.SparseMatrixCLIL{Num, Int}, b::Vector{SymbolicT}, var_eq_matching::StateSelection.VarEqMatchingT, alg_eqs::Vector{Int}, alg_vars::Vector{Int})
+function __reduce_linear_system!(A::StateSelection.CLIL.SparseMatrixCLIL{Num, Int}, b::Vector{SymbolicT}, var_eq_matching::StateSelection.VarEqMatchingT, alg_eqs::Vector{Int}, alg_vars::Vector{Int},
+        state::TearingState; allow_symbolic::Bool = false, allow_parameter::Bool = true)
     N = length(b)
     # Identify rows (equations) not worth involving in the linear solve.
     #
-    # The current heuristic is to find all rows with constant coefficients
-    # which are matched to a variable in `var_eq_matching`.
+    # A matched row can be eliminated (solved for its matched variable and
+    # substituted into the remaining rows) whenever its *pivot* coefficient is
+    # reliably nonzero: a nonzero constant (structural nonzeros are nonzero by
+    # construction), or a parameter expression subject to the usual
+    # `maybe_zeros` guard. The non-pivot coefficients merely fold into the
+    # substituted expression and may be arbitrary expressions. The elimination
+    # order is acyclic because the matching comes from tearing.
     eqs_mask = trues(N)
     vars_mask = trues(N)
     new_N = N
+    n_const_pivot = 0
+    n_param_pivot = 0
     eq_var_matching = invview(var_eq_matching)
     var_to_idx = Dict{Int, Int}(Iterators.map(reverse, enumerate(alg_vars)))
     # The `i`th variable in the SCC is eliminated as
@@ -722,18 +739,32 @@ function __reduce_linear_system!(A::StateSelection.CLIL.SparseMatrixCLIL{Num, In
     constants = Dict{Int, SymbolicT}()
     aliases = Dict{Int, SparseArrays.SparseVector{Num, Int}}()
     for (i, coeffs) in enumerate(A.row_vals)
-        all(SU.isconst ∘ unwrap, coeffs) || continue
         eq_var_matching[alg_eqs[i]] isa Int || continue
+        var = eq_var_matching[alg_eqs[i]]::Int
+        ivar = get(var_to_idx, var, 0)
+        iszero(ivar) && continue
+
+        eqvars = A.row_cols[i]
+        idx_in_eq = findfirst(isequal(ivar), eqvars)
+        # The matched coefficient may have cancelled during substitution.
+        idx_in_eq isa Int || continue
+        var_coeff = coeffs[idx_in_eq]
+        if SU.isconst(unwrap(var_coeff))
+            n_const_pivot += 1
+        else
+            _check_allow_symbolic_parameter(
+                state, unwrap(var_coeff), allow_symbolic, allow_parameter) || continue
+            n_param_pivot += 1
+            if haskey(ENV, "MTK_DEBUG_LINSCC")
+                println("[linscc] param pivot for ", bounded_string(state.fullvars[var], 80),
+                    ": ", bounded_string(var_coeff, 200))
+            end
+        end
 
         eqs_mask[i] = false
-        var = eq_var_matching[alg_eqs[i]]::Int
-        ivar = var_to_idx[var]
         vars_mask[ivar] = false
         new_N -= 1
 
-        eqvars = A.row_cols[i]
-        idx_in_eq = findfirst(isequal(ivar), eqvars)::Int
-        var_coeff = coeffs[idx_in_eq]
         deleteat!(eqvars, idx_in_eq)
         deleteat!(coeffs, idx_in_eq)
         # Negation to move variables to the other side of the equality
@@ -741,6 +772,12 @@ function __reduce_linear_system!(A::StateSelection.CLIL.SparseMatrixCLIL{Num, In
         aliases[ivar] = SparseArrays.SparseVector(N, eqvars, coeffs)
         # `b` is already on the other side of the equality
         constants[ivar] = b[i] / var_coeff
+    end
+
+    if haskey(ENV, "MTK_DEBUG_LINSCC")
+        retained = [state.fullvars[alg_vars[i]] for i in 1:N if vars_mask[i]]
+        println("[linscc] SCC $(N)×$(N) → $(new_N)×$(new_N); eliminated $(N - new_N) matched rows ($(n_const_pivot) const pivot, $(n_param_pivot) param pivot)")
+        println("[linscc] retained vars: ", join(retained, ", "))
     end
 
     # We could have eliminated a variable in terms of other eliminated variables. While
@@ -787,8 +824,23 @@ function __reduce_linear_system!(A::StateSelection.CLIL.SparseMatrixCLIL{Num, In
             cst += coeff * other_cst
         end
 
-        # `sparsevec` sums duplicate indices but keeps explicit zeros; drop them.
-        aliases[var] = SparseArrays.dropzeros!(SparseArrays.sparsevec(new_I, new_V, length(coeffs)))
+        # Sum duplicate indices and drop zeros. `sparsevec` + `dropzeros!` would
+        # do this, but `dropzeros!` on a `SparseVector{Num}` performs a semantic
+        # (expansion-based) zero test that can blow up on large symbolic
+        # coefficients, so merge manually with a structural zero check.
+        perm = sortperm(new_I)
+        merged_I = Int[]
+        merged_V = Num[]
+        for idx in perm
+            if !isempty(merged_I) && merged_I[end] == new_I[idx]
+                merged_V[end] += new_V[idx]
+            else
+                push!(merged_I, new_I[idx])
+                push!(merged_V, new_V[idx])
+            end
+        end
+        keep = findall(!StateSelection.CLIL.cheap_iszero, merged_V)
+        aliases[var] = SparseArrays.SparseVector(N, merged_I[keep], merged_V[keep])
         constants[var] = cst
     end
 
