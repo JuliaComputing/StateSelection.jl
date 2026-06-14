@@ -480,20 +480,23 @@ order, without stringifying symbolic expressions. Total: compound expressions
 their operation name.
 """
 function canonical_sort_key(v::SymbolicT)
-    opsig = ()
+    # `opsig`/`idxs` are built as `Vector{Int}` (not growing tuples) so the key
+    # type is concrete and inferrable after the loop. Vectors compare
+    # lexicographically, so the tuple ordering is unchanged.
+    opsig = Int[]
     x = v
     while true
         stripped = @match x begin
             BSImpl.Term(; f, args) && if f isa Differential end => begin
-                opsig = (opsig..., 1)
+                push!(opsig, 1)
                 args[1]
             end
             BSImpl.Term(; f, args) && if f isa MTKBase.Shift end => begin
-                opsig = (opsig..., 2, f.steps)
+                push!(opsig, 2, Int(f.steps))
                 args[1]
             end
             BSImpl.Term(; f, args) && if f isa SU.Operator && length(args) == 1 end => begin
-                opsig = (opsig..., 3)
+                push!(opsig, 3)
                 args[1]
             end
             _ => nothing
@@ -501,12 +504,12 @@ function canonical_sort_key(v::SymbolicT)
         stripped === nothing && break
         x = stripped
     end
-    idxs = ()
+    idxs = Int[]
     @match x begin
         BSImpl.Term(; f, args) && if f === getindex end => begin
             for i in Iterators.drop(args, 1)
                 ival = SU.isconst(i) ? manual_dispatch_is_small_int(unwrap_const(i))::Int : 0
-                idxs = (idxs..., ival)
+                push!(idxs, ival)
             end
             x = args[1]
         end
