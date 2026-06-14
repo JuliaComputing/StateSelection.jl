@@ -236,46 +236,24 @@ end
     @test bad == false
 end
 
-@testset "`_reexpand_buried_scc_vars!` re-expands buried SCC variables (#98)" begin
+@testset "`_assert_b_free_of_scc_vars` guards the b-free invariant (#98)" begin
     SymT = Symbolics.SymbolicT
     @variables x(t) y(t)
-    @named sys = System([D(x) ~ x + 3y, D(y) ~ x + y], t)
     vars = [unwrap(x), unwrap(y)]
-    ev(z) = MTKTearing._evalnum(z, Dict{Any, Float64}())
 
-    # Reproduce the #98 desync directly: the structural `has_edge` gate dropped the
-    # `(eq1, y)` edge, so column 2 (`y`) is missing from row 1 of `A` even though `y` is
-    # still live in `b[1]`. This is exactly the state that makes `get_linear_scc_linsol`
-    # emit a rank-deficient row; without the repair, `__reduce_linear_system!` (which only
-    # inspects the coefficient row, never `b`) smuggles this buried `y` onto the RHS.
-    #   row1 (desynced): only x present;  b1 = 3y + 5   (true row: x + 3y = -5)
-    #   row2 (intact):   x + y present;   b2 = 2         (no SCC variable)
-    mkA() = StateSelection.CLIL.SparseMatrixCLIL{Num, Int}(
-        2, 2, collect(1:2), [[1], [1, 2]], [Num[1.0], Num[1.0, 1.0]])
-    A = mkA()
-    b = SymT[unwrap(3y + 5), unwrap(Num(2))]
+    # A correct construction expands every SCC variable out of `b`, so the invariant holds
+    # and the assertion passes (returns `nothing`).
+    @test MTKTearing._assert_b_free_of_scc_vars(
+        SymT[unwrap(Num(5)), unwrap(Num(2))], vars) === nothing
 
-    n = MTKTearing._reexpand_buried_scc_vars!(A, b, vars, sys)
-
-    @test n == 1
-    # The invariant the repair restores: `b` is free of all SCC variables.
-    leftover = Set{SymT}()
-    foreach(bi -> Symbolics.get_variables!(leftover, bi), b)
-    @test isempty(intersect(leftover, Set(vars)))
-    # The buried `y` (coefficient 3) was re-expanded into column 2 of row 1, and the
-    # constant remains in `b`.
-    @test A.row_cols[1] == [1, 2]
-    @test ev.(A.row_vals[1]) == [1.0, 3.0]
-    @test ev(b[1]) == 5.0
-    # The already-consistent row 2 is untouched.
-    @test A.row_cols[2] == [1, 2]
-    @test ev(b[2]) == 2.0
-
-    # A buried term that is not linear in an SCC variable cannot be re-expanded, so the
-    # repair returns `nothing` to make the caller fall back to the non-inlined path.
-    Anl = mkA()
-    bnl = SymT[unwrap(y^2 + 5), unwrap(Num(2))]
-    @test MTKTearing._reexpand_buried_scc_vars!(Anl, bnl, vars, sys) === nothing
+    # The #98 broken state — a live SCC variable left buried in `b` because the structural
+    # `has_edge` gate desynced from the substituted residual — is exactly what, if it
+    # reached `__reduce_linear_system!`, would be smuggled onto the RHS. The assertion must
+    # catch it.
+    @test_throws ErrorException MTKTearing._assert_b_free_of_scc_vars(
+        SymT[unwrap(3y + 5)], vars)
+    @test_throws ErrorException MTKTearing._assert_b_free_of_scc_vars(
+        SymT[unwrap(Num(5)), unwrap(2x + 1)], vars)
 end
 
 @testset "`system_subset(::SystemStructure)` subsets `.state_priorities`" begin
