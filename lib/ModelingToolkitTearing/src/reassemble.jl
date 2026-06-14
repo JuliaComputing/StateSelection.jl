@@ -543,6 +543,63 @@ const INLINE_LINEAR_SCC_OP = (\)
 """
     $TYPEDSIGNATURES
 
+Restore the invariant that the inline-linear-SCC right-hand side `b` is free of all SCC
+variables `vars`, re-expanding into the coefficient matrix `A` any SCC variable that the
+`has_edge` gate in [`get_linear_scc_linsol`](@ref) failed to extract (because the structural
+incidence graph desynced from the substituted residual; see issue #98). For each `b[eqidx]`
+still referencing an SCC variable whose column is absent from `A`'s row, the variable is
+linearly expanded out of `b[eqidx]` and its coefficient pushed into `A`. `sys` is used only
+to fetch the (cached) linear expander for each variable.
+
+Returns the number of equations repaired, or `nothing` if a buried term is not linear in an
+SCC variable, in which case the caller must fall back to the safe non-inlined path.
+"""
+function _reexpand_buried_scc_vars!(
+        A::StateSelection.CLIL.SparseMatrixCLIL, b::AbstractVector, vars, sys)
+    var_atoms = map(vars) do var
+        atoms = Set{SymbolicT}()
+        Symbolics.get_variables!(atoms, var)
+        atoms
+    end
+    scc_atoms = reduce(union, var_atoms; init = Set{SymbolicT}())
+    repaired = 0
+    isempty(scc_atoms) && return repaired
+    bsyms = Set{SymbolicT}()
+    present = Set{Int}()
+    for eqidx in eachindex(b)
+        Symbolics.get_variables!(empty!(bsyms), b[eqidx])
+        any(in(scc_atoms), bsyms) || continue
+        union!(empty!(present), A.row_cols[eqidx])
+        did_repair = false
+        for (varidx, var) in enumerate(vars)
+            varidx in present && continue
+            # Only invoke the (cached) expander if this variable actually occurs.
+            any(in(bsyms), var_atoms[varidx]) || continue
+            lex = MTKBase.get_linear_expander_for!(sys, var, true)
+            p, q, islinear = lex(b[eqidx])
+            islinear || return nothing
+            b[eqidx] = q
+            if !SU._iszero(p)
+                push!(A.row_cols[eqidx], varidx)
+                push!(A.row_vals[eqidx], p)
+                did_repair = true
+            end
+            Symbolics.get_variables!(empty!(bsyms), b[eqidx])
+        end
+        if did_repair
+            # The re-expanded columns may be out of order; `A.row_cols` must be sorted.
+            perm = sortperm(A.row_cols[eqidx])
+            A.row_cols[eqidx] = A.row_cols[eqidx][perm]
+            A.row_vals[eqidx] = A.row_vals[eqidx][perm]
+            repaired += 1
+        end
+    end
+    return repaired
+end
+
+"""
+    $TYPEDSIGNATURES
+
 If the SCC identified by `alg_eqs` and `alg_vars` warrants a linear solve, return a 3-tuple:
 
 - The expression denoting the solution of the linear system. The linear system
@@ -613,45 +670,10 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
     # coefficient row, never `b`), the buried variable is smuggled onto the RHS of
     # retained equations, producing an inconsistent runtime `A \ b` (issue #98). Restore
     # the invariant "`b` is free of all SCC variables" by re-expanding any leftover term.
-    var_atoms = map(vars) do var
-        atoms = Set{SymbolicT}()
-        Symbolics.get_variables!(atoms, var)
-        atoms
-    end
-    scc_atoms = reduce(union, var_atoms; init = Set{SymbolicT}())
-    repaired = 0
-    if !isempty(scc_atoms)
-        bsyms = Set{SymbolicT}()
-        present = Set{Int}()
-        for eqidx in 1:N
-            Symbolics.get_variables!(empty!(bsyms), b[eqidx])
-            any(in(scc_atoms), bsyms) || continue
-            union!(empty!(present), A.row_cols[eqidx])
-            did_repair = false
-            for (varidx, var) in enumerate(vars)
-                varidx in present && continue
-                # Only invoke the (cached) expander if this variable actually occurs.
-                any(in(bsyms), var_atoms[varidx]) || continue
-                lex = MTKBase.get_linear_expander_for!(sys, var, true)
-                p, q, islinear = lex(b[eqidx])
-                islinear || return nothing
-                b[eqidx] = q
-                if !SU._iszero(p)
-                    push!(A.row_cols[eqidx], varidx)
-                    push!(A.row_vals[eqidx], p)
-                    did_repair = true
-                end
-                Symbolics.get_variables!(empty!(bsyms), b[eqidx])
-            end
-            if did_repair
-                # The re-expanded columns may be out of order; `A.row_cols` must be sorted.
-                perm = sortperm(A.row_cols[eqidx])
-                A.row_cols[eqidx] = A.row_cols[eqidx][perm]
-                A.row_vals[eqidx] = A.row_vals[eqidx][perm]
-                repaired += 1
-            end
-        end
-    end
+    repaired = _reexpand_buried_scc_vars!(A, b, vars, sys)
+    # A buried term that is not linear in an SCC variable cannot be re-expanded; fall back
+    # to the safe non-inlined path.
+    repaired === nothing && return nothing
     if repaired > 0 && _inline_scc_check_enabled()
         @info "Inline-linear-SCC construction re-expanded buried SCC variables in `b`" block_n=N repaired_equations=repaired alg_vars
     end
