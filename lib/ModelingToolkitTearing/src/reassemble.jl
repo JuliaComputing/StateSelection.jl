@@ -613,19 +613,25 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
     # coefficient row, never `b`), the buried variable is smuggled onto the RHS of
     # retained equations, producing an inconsistent runtime `A \ b` (issue #98). Restore
     # the invariant "`b` is free of all SCC variables" by re-expanding any leftover term.
-    var_atoms = [Set{Any}(Symbolics.get_variables(unwrap(var))) for var in vars]
-    scc_atoms = union(Set{Any}(), var_atoms...)
+    var_atoms = map(vars) do var
+        atoms = Set{SymbolicT}()
+        Symbolics.get_variables!(atoms, var)
+        atoms
+    end
+    scc_atoms = reduce(union, var_atoms; init = Set{SymbolicT}())
     repaired = 0
     if !isempty(scc_atoms)
+        bsyms = Set{SymbolicT}()
+        present = Set{Int}()
         for eqidx in 1:N
-            bsyms = Symbolics.get_variables(unwrap(b[eqidx]))
+            Symbolics.get_variables!(empty!(bsyms), b[eqidx])
             any(in(scc_atoms), bsyms) || continue
-            present = Set(A.row_cols[eqidx])
+            union!(empty!(present), A.row_cols[eqidx])
             did_repair = false
             for (varidx, var) in enumerate(vars)
                 varidx in present && continue
                 # Only invoke the (cached) expander if this variable actually occurs.
-                isempty(intersect(var_atoms[varidx], bsyms)) && continue
+                any(in(bsyms), var_atoms[varidx]) || continue
                 lex = MTKBase.get_linear_expander_for!(sys, var, true)
                 p, q, islinear = lex(b[eqidx])
                 islinear || return nothing
@@ -635,7 +641,7 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
                     push!(A.row_vals[eqidx], p)
                     did_repair = true
                 end
-                bsyms = Symbolics.get_variables(unwrap(b[eqidx]))
+                Symbolics.get_variables!(empty!(bsyms), b[eqidx])
             end
             if did_repair
                 # The re-expanded columns may be out of order; `A.row_cols` must be sorted.
