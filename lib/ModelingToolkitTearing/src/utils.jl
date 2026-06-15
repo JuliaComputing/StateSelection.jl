@@ -176,3 +176,63 @@ function permute(mm::StateSelection.SparseMatrixCLIL{S, T}, oldtonewvar::Vector{
 
     return StateSelection.SparseMatrixCLIL{S, T}(mm.nparentrows, mm.ncols, nzrows, rowcols, rowvals)
 end
+
+"""
+    $TYPEDEF
+
+Thrown by [`BoundedIO`](@ref) when the byte limit is reached.
+"""
+struct BoundedIOOverflow <: Exception end
+
+"""
+    $TYPEDEF
+
+An `IO` wrapper that throws [`BoundedIOOverflow`](@ref) once more than
+`remaining` bytes have been written to it. Printing a symbolic expression
+produces output proportional to its *tree* size, which is exponential in the
+sharing depth of the hash-consed DAG; since printing streams depth-first,
+aborting after a bounded number of bytes also bounds the traversal work.
+"""
+mutable struct BoundedIO{T <: IO} <: IO
+    io::T
+    remaining::Int
+end
+
+function Base.write(io::BoundedIO, b::UInt8)
+    io.remaining <= 0 && throw(BoundedIOOverflow())
+    io.remaining -= 1
+    return write(io.io, b)
+end
+
+# Without this, bulk writes (e.g. printing a `String`) fall back to Base's
+# generic byte-at-a-time `unsafe_write`. Mirror what `LimitIO` does: write the
+# whole chunk at once, filling exactly up to the limit before aborting.
+function Base.unsafe_write(io::BoundedIO, p::Ptr{UInt8}, nb::UInt)
+    if nb > io.remaining
+        if io.remaining > 0
+            unsafe_write(io.io, p, io.remaining % UInt)
+            io.remaining = 0
+        end
+        throw(BoundedIOOverflow())
+    end
+    nw = unsafe_write(io.io, p, nb)
+    io.remaining -= nw
+    return nw
+end
+
+"""
+    $TYPEDSIGNATURES
+
+`string(x)`, truncated to at most `limit` bytes of output. The truncation also
+bounds the printing work, making this safe to call on expressions whose full
+printed form would be astronomically large.
+"""
+function bounded_string(x, limit::Int)
+    buf = IOBuffer(; sizehint = limit)
+    try
+        print(BoundedIO(buf, limit), x)
+    catch err
+        err isa BoundedIOOverflow || rethrow()
+    end
+    return String(take!(buf))
+end
