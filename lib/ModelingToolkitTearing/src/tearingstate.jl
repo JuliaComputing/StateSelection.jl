@@ -365,8 +365,12 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
 
     if sort_eqs
         # sort equations lexicographically to reduce simplification issues
-        # depending on order due to NP-completeness of tearing.
-        sortidxs = Base.sortperm(string.(eqs)) # "by = string" creates more strings
+        # depending on order due to NP-completeness of tearing. Sort on a
+        # bounded prefix of the printed form: the full `string` of an equation
+        # is exponential in the sharing depth of hash-consed expressions, and
+        # ties on the first 4096 bytes keep their original (deterministic)
+        # relative order since the default sort is stable.
+        sortidxs = Base.sortperm(map(Base.Fix2(bounded_string, 4096), eqs))
         eqs = eqs[sortidxs]
         original_eqs = original_eqs[sortidxs]
         symbolic_incidence = symbolic_incidence[sortidxs]
