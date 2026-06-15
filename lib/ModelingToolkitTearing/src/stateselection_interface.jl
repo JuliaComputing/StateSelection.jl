@@ -250,7 +250,21 @@ function _is_zero_at_defaults(state::TearingState, denom::SymbolicT)
         return false
     end
     val = unwrap(val)
-    SU.isconst(val) || return false
+    if !SU.isconst(val)
+        # A derived geometry component such as a four-bar link offset
+        # `getindex(CD * d_b1 / norm_(d_b1), 1)` with `d_b1 = [0, …]` is
+        # structurally zero, but survives `fixpoint_sub` as an unevaluated
+        # `getindex` of a *scaled* array expression (the index never gets pushed
+        # through the scalar mul/div). Scalarize to distribute the index over the
+        # array ops, re-fold, and re-test. This only ever lets us prove *more*
+        # divisors zero — genuinely nonzero pivots stay eligible.
+        val = try
+            unwrap(Symbolics.fixpoint_sub(Symbolics.scalarize(val), defs))
+        catch
+            return false
+        end
+        SU.isconst(val) || return false
+    end
     v = SU.unwrap_const(val)
     return v isa Number && iszero(v)
 end
