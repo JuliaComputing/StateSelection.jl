@@ -586,7 +586,12 @@ function SU.promote_shape(::typeof(inline_scc_ldiv), sha::SU.ShapeT, shb::SU.Sha
     return shb
 end
 
-const INLINE_LINEAR_SCC_OP = inline_scc_ldiv
+# REPRO (DyadCompilerPasses#43): emit inline-SCC blocks as a plain `\` so the
+# DCP LDIV_RULE matches and rewrites them under optimize=:basic — exposing the
+# node-replacement wiring corruption. (best-of-both uses inline_scc_ldiv, whose
+# non-`\` head sidesteps the buggy pass.) The zero-pivot scalarize guard is kept,
+# so the HalfCar block is finite — isolating the wiring defect, not an Inf.
+const INLINE_LINEAR_SCC_OP = (\)
 
 """
     $TYPEDSIGNATURES
