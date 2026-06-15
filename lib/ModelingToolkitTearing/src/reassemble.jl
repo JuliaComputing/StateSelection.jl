@@ -538,7 +538,55 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
     length(solved_vars_set)
 end
 
-const INLINE_LINEAR_SCC_OP = (\)
+"""
+    inline_scc_ldiv(A, b)
+
+Rank-tolerant linear solve for inline linear-SCC blocks. The aggressive
+param-pivot reduction can emit a per-step block that is exactly singular at the
+operating point when a genuine reaction/cut-torque is statically indeterminate
+(e.g. the FullCar's mount-reaction split). A plain `\\` (LU) throws
+`SingularException` on such a block even though the dynamics are well-posed: the
+indeterminate reaction admits a one-parameter family of consistent solutions, so
+any consistent solution yields the same accelerations. Use the ordinary LU
+solution when the block is nonsingular — correct even when merely
+ill-conditioned, unlike `pinv` which drops small-but-real singular values — and
+the minimum-norm solution only when LU reports rank deficiency.
+"""
+function inline_scc_ldiv(A::AbstractMatrix{<:Number}, b::AbstractVector{<:Number})
+    if size(A, 1) == size(A, 2)
+        F = LinearAlgebra.lu(A; check = false)
+        LinearAlgebra.issuccess(F) && return F \ b
+    end
+    return LinearAlgebra.pinv(A) * b
+end
+# Symbolic arguments (reduction time): build a term with the same shape/type as
+# `\` would produce, but with this head, so the runtime call routes to the
+# rank-tolerant numeric method above. Using a head other than `\` also keeps the
+# DyadCompilerPasses LDIV pass (which matches `operation === (\)` and has a
+# codegen-wiring bug) from ever rewriting these blocks.
+function inline_scc_ldiv(A, b)
+    ref = unwrap(A \ b)
+    SU.iscall(ref) || return ref
+    # Rebuild with this head but the reference term's exact shape/type/metadata —
+    # `maketerm`/`promote_shape` have no shape rule for a custom op and would
+    # yield an `Unknown` shape, which breaks the inline-SCC bookkeeping.
+    return SU.BSImpl.Term{VartypeT}(inline_scc_ldiv, SU.arguments(ref);
+        type = SU.symtype(ref), shape = SU.shape(ref), metadata = SU.metadata(ref))
+end
+
+# `inline_scc_ldiv` behaves exactly like `\` for symtype/shape inference. Any
+# later term rebuild (substitution, simplification, codegen) re-derives these via
+# `promote_symtype`/`promote_shape`; without these methods the custom op would
+# infer `Any`/`Unknown` and break downstream type-directed dispatch.
+SU.promote_symtype(::typeof(inline_scc_ldiv), T::SU.TypeT, S::SU.TypeT) =
+    SU.promote_symtype(\, T, S)
+# `A \ b` for a square inline-SCC block yields a vector of the same shape as `b`.
+function SU.promote_shape(::typeof(inline_scc_ldiv), sha::SU.ShapeT, shb::SU.ShapeT)
+    (sha isa SU.Unknown || shb isa SU.Unknown) && return SU.Unknown(-1)
+    return shb
+end
+
+const INLINE_LINEAR_SCC_OP = inline_scc_ldiv
 
 """
     $TYPEDSIGNATURES
@@ -704,15 +752,11 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
     b = SU.Code.with_allocator(b_allocator, SU.Const{VartypeT}(b))
     state.sys = sys
 
-    # Build the `\` term for its type/shape promotion, then swap the operation
-    # for the NaN-propagating variant: initialization reconstruction evaluates
-    # observed chains with NaN sentinels, on which `lu` inside `\` throws.
-    ldiv_term = INLINE_LINEAR_SCC_OP(A, b)
-    linsol = Symbolics.STerm(
-        MTKBase.nan_safe_ldiv, Symbolics.SArgsT((A, b));
-        type = SU.symtype(ldiv_term), shape = SU.shape(ldiv_term)
-    )
-    return (linsol, eqs_mask, vars_mask)
+    # PARAM-PIVOT-PLAIN-LDIV VARIANT: keep 29d5816's param-pivot reduction but
+    # use the plain `\` term (not the nan_safe_ldiv STerm, which crashes the cars'
+    # least-squares-init varmap). Sparsity-declared axes keep the folded aliases
+    # well-formed (no axis*axis' array-power).
+    return (INLINE_LINEAR_SCC_OP(A, b), eqs_mask, vars_mask)
 end
 
 function __reduce_linear_system!(A::StateSelection.CLIL.SparseMatrixCLIL{Num, Int}, b::Vector{SymbolicT}, var_eq_matching::StateSelection.VarEqMatchingT, alg_eqs::Vector{Int}, alg_vars::Vector{Int},
