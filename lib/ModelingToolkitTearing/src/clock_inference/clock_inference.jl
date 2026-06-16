@@ -274,7 +274,9 @@ function (ivc::InferVariableClosure)(var::SymbolicT)
             nested_ivc(v)
         end
 
-        push!(arg_hyperedge, ClockVertex.Expression(arg))
+        if !SU.isconst(arg)
+            push!(arg_hyperedge, ClockVertex.Expression(arg))
+        end
         # NOTE: Ensure all branches here add `arg_hyperedge` to the inference graph. It
         # is the parent hyperedge for `nested_ivc`, so this closure is responsible for
         # adding it to the graph.
