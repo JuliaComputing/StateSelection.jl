@@ -543,6 +543,37 @@ const INLINE_LINEAR_SCC_OP = (\)
 """
     $TYPEDSIGNATURES
 
+Assert the invariant that the inline-linear-SCC right-hand side `b` is free of all SCC
+variables `vars`. A correct construction expands every SCC variable out of `b` into the
+coefficient matrix `A`; a live SCC variable left buried inside some `b[eqidx]` indicates the
+structural incidence graph desynced from the `total_sub`-substituted residual (issue #98),
+which would otherwise be smuggled onto the RHS by `__reduce_linear_system!`. Throws an error
+identifying the offending variable(s) if the invariant is violated.
+
+Only invoked when the self-check is enabled (`MTKTEARING_CHECK_REDUCTION`); the construction
+is expected to maintain this invariant unconditionally.
+"""
+function _assert_b_free_of_scc_vars(b::AbstractVector, vars)
+    scc_atoms = Set{SymbolicT}()
+    for var in vars
+        Symbolics.get_variables!(scc_atoms, var)
+    end
+    isempty(scc_atoms) && return nothing
+    bsyms = Set{SymbolicT}()
+    for eqidx in eachindex(b)
+        Symbolics.get_variables!(empty!(bsyms), b[eqidx])
+        buried = intersect(bsyms, scc_atoms)
+        isempty(buried) && continue
+        error("Inline-linear-SCC construction left SCC variable(s) $(collect(buried)) \
+               buried in the right-hand side `b[$eqidx]`; the structural incidence graph \
+               desynced from the substituted residual (issue #98).")
+    end
+    return nothing
+end
+
+"""
+    $TYPEDSIGNATURES
+
 If the SCC identified by `alg_eqs` and `alg_vars` warrants a linear solve, return a 3-tuple:
 
 - The expression denoting the solution of the linear system. The linear system
@@ -605,6 +636,15 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
             b[eqidx] = q
         end
     end
+
+    # The `has_edge` gate above relies on the structural incidence `graph`, which is mutated
+    # during reassembly and could in principle desync from the `total_sub`-substituted
+    # residual, leaving a live SCC variable buried inside some `b[eqidx]`. Such a variable
+    # would be smuggled onto the RHS of retained equations by `__reduce_linear_system!`
+    # (which inspects only the coefficient row, never `b`), producing an inconsistent runtime
+    # `A \ b` (issue #98). The construction is expected to keep `b` free of all SCC
+    # variables; when the self-check is enabled, assert it so any regression surfaces loudly.
+    _inline_scc_check_enabled() && _assert_b_free_of_scc_vars(b, vars)
 
     # `-` is important! `b` is on the other side of the equality.
     for i in eachindex(b)
@@ -706,8 +746,135 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
     return (INLINE_LINEAR_SCC_OP(A, b), eqs_mask, vars_mask)
 end
 
+# ---------------------------------------------------------------------------
+# Opt-in self-checks for the inline-linear-SCC pass (issue #98).
+#
+# These are disabled unless the `MTKTEARING_CHECK_REDUCTION` environment variable
+# is set to a non-empty value. When off, the only added cost is a single `get(ENV,
+# ...)` per SCC and the snapshots below are skipped, so production pays nothing.
+# ---------------------------------------------------------------------------
+
+"""
+    $TYPEDSIGNATURES
+
+Whether the inline-linear-SCC self-checks are enabled. Controlled by the
+`MTKTEARING_CHECK_REDUCTION` environment variable (any non-empty value enables it).
+"""
+_inline_scc_check_enabled() = !isempty(get(ENV, "MTKTEARING_CHECK_REDUCTION", ""))
+
+# Numerically evaluate a symbolic expression under a substitution of *all* its free
+# symbols to numbers. Deliberately avoids `iszero`/`simplify`/`expand`, which can OOM
+# on large multibody coefficient expressions (see StateSelection.jl#95).
+_evalnum(x, subs::AbstractDict) =
+    Float64(Symbolics.value(Symbolics.substitute(unwrap(x), subs; fold = Val(true))))
+
+_free_syms_into!(s::AbstractSet, x) =
+    (union!(s, Symbolics.get_variables(unwrap(x))); s)
+
+# Build a deterministic random substitution for all free symbols appearing in the
+# given symbolic containers, plus an RNG seeded from the symbol *names* (so a reported
+# failure reproduces across runs). Returns `(subs, rng)`.
+function _deterministic_subs(containers...)
+    syms = Set{Any}()
+    for c in containers, x in c
+        _free_syms_into!(syms, x)
+    end
+    symvec = sort!(collect(syms); by = string)
+    seed = foldl((h, s) -> hash(string(s), h), symvec; init = UInt(0x5eed))
+    rng = Random.MersenneTwister(seed % typemax(UInt) + one(UInt))
+    subs = Dict{Any, Float64}(s => randn(rng) for s in symvec)
+    return subs, rng
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Verify that the reduced linear system `A_red x_ret = b_red` produced by
+`__reduce_linear_system!` is the *exact* substitution-projection of the full system
+`A0 x = b0`, i.e. for every retained equation the reduced residual equals the full
+residual after replacing each eliminated variable `v` by `aliases[v]·x_ret +
+constants[v]`. Returns `true` iff the identity holds at a deterministic pseudo-random
+probe point. Pure and positional: it does not need to know which symbols are the SCC
+variables (those are represented by column position, not as free symbols).
+"""
+function _reduction_identity_ok(
+        A0::AbstractMatrix, b0::AbstractVector, A_red::AbstractMatrix, b_red::AbstractVector,
+        aliases::AbstractDict, constants::AbstractDict, eqs_mask::BitVector,
+        vars_mask::BitVector, old_to_new_eq::Vector{Int}; rtol::Float64 = 1e-7)
+    N = length(b0)
+    aliasvals = (SparseArrays.nonzeros(sv) for sv in values(aliases))
+    subs, rng = _deterministic_subs(A0, b0, A_red, b_red, values(constants), aliasvals...)
+
+    # New index of each retained variable (mirrors `cumsum(vars_mask)` in the caller).
+    old_to_new_var = zeros(Int, N)
+    let c = 0
+        for j in 1:N
+            vars_mask[j] || continue
+            old_to_new_var[j] = (c += 1)
+        end
+    end
+    nret = count(vars_mask)
+    xret = randn(rng, nret)
+
+    # Full-length solution: retained vars from `xret`, eliminated vars from their alias.
+    xfull = Vector{Float64}(undef, N)
+    for j in 1:N
+        vars_mask[j] && (xfull[j] = xret[old_to_new_var[j]])
+    end
+    for j in 1:N
+        vars_mask[j] && continue
+        acc = _evalnum(constants[j], subs)
+        I, V = SparseArrays.findnz(aliases[j])
+        for (k, coeff) in zip(I, V)
+            # After Phase-2 flattening, `k` references only retained variables.
+            acc += _evalnum(coeff, subs) * xfull[k]
+        end
+        xfull[j] = acc
+    end
+
+    nr = length(b_red)
+    ok = true
+    for i in 1:N
+        eqs_mask[i] || continue
+        ired = old_to_new_eq[i]
+        rfull = sum(_evalnum(A0[i, j], subs) * xfull[j] for j in 1:N; init = 0.0) - _evalnum(b0[i], subs)
+        rred = sum(_evalnum(A_red[ired, j], subs) * xret[j] for j in 1:nr; init = 0.0) - _evalnum(b_red[ired], subs)
+        if abs(rfull - rred) > rtol * (1 + abs(rfull))
+            ok = false
+            @warn "Inline-linear-SCC reduction identity violated" full_row=i reduced_row=ired residual_full=rfull residual_reduced=rred mismatch=abs(rfull - rred)
+        end
+    end
+    return ok
+end
+
+# Report the rank/consistency of the full and reduced blocks at a deterministic probe
+# point. Distinguishes "full block already bad (upstream construction)" from "reduction
+# broke it". Logs via `@info`; only called when the self-check is enabled.
+function _reduction_rank_report(A0::AbstractMatrix, b0::AbstractVector,
+        A_red::AbstractMatrix, b_red::AbstractVector, alg_vars::Vector{Int})
+    subs, _ = _deterministic_subs(A0, b0, A_red, b_red)
+    N = length(b0)
+    A0n = [_evalnum(A0[i, j], subs) for i in 1:N, j in 1:N]
+    b0n = [_evalnum(b0[i], subs) for i in 1:N]
+    nr = length(b_red)
+    Arn = [_evalnum(A_red[i, j], subs) for i in 1:nr, j in 1:nr]
+    brn = [_evalnum(b_red[i], subs) for i in 1:nr]
+    # Rank-tolerant residual: min-norm least-squares via the pseudoinverse, so a
+    # (legitimately) rank-deficient block does not throw and we can still tell whether
+    # `b` lies in the range of `A` (relres ≈ 0 consistent, relres ≈ 1 inconsistent).
+    relres(A, b) = isempty(b) ? 0.0 : LinearAlgebra.norm(A * (LinearAlgebra.pinv(A) * b) - b) / max(LinearAlgebra.norm(b), eps())
+    consistent(A, b) = LinearAlgebra.rank(A) == LinearAlgebra.rank(hcat(A, b))
+    @info "Inline-linear-SCC block diagnostics" alg_vars full_n=N full_rank=LinearAlgebra.rank(A0n) full_consistent=consistent(A0n, b0n) full_relres=relres(A0n, b0n) reduced_n=nr reduced_rank=(nr == 0 ? 0 : LinearAlgebra.rank(Arn)) reduced_consistent=(nr == 0 ? true : consistent(Arn, brn)) reduced_relres=relres(Arn, brn)
+    return nothing
+end
+
 function __reduce_linear_system!(A::StateSelection.CLIL.SparseMatrixCLIL{Num, Int}, b::Vector{SymbolicT}, var_eq_matching::StateSelection.VarEqMatchingT, alg_eqs::Vector{Int}, alg_vars::Vector{Int})
     N = length(b)
+    # Snapshot the pre-reduction system for the opt-in self-check. `A`'s rows are
+    # mutated in place below and `b` is reassigned, so these must be copies.
+    _check = _inline_scc_check_enabled()
+    A0_check = _check ? collect(A)::Matrix{Num} : nothing
+    b0_check = _check ? copy(b) : nothing
     # Identify rows (equations) not worth involving in the linear solve.
     #
     # The current heuristic is to find all rows with constant coefficients
@@ -816,6 +983,13 @@ function __reduce_linear_system!(A::StateSelection.CLIL.SparseMatrixCLIL{Num, In
     old_to_new_eq = cumsum(eqs_mask)
     old_to_new_eq[.!eqs_mask] .= 0
     A = StateSelection.get_new_mm(aliases, old_to_new_eq, old_to_new_var, A)
+
+    if _check
+        A_red_check = collect(A)::Matrix{Num}
+        _reduction_identity_ok(A0_check, b0_check, A_red_check, b, aliases, constants,
+                               eqs_mask, vars_mask, old_to_new_eq)
+        _reduction_rank_report(A0_check, b0_check, A_red_check, b, alg_vars)
+    end
 
     return A, b, eqs_mask, vars_mask
 end
