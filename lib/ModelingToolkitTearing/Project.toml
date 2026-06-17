@@ -13,6 +13,7 @@ ModelingToolkitBase = "7771a370-6774-4173-bd38-47e70ca0b839"
 Moshi = "2e0e35c7-a2e4-4343-998d-7ef72827ed2d"
 OffsetArrays = "6fe1bfb0-de20-5000-8ca7-80f57d26f881"
 OrderedCollections = "bac558e1-5e72-5ebc-8fee-abe8a469f55d"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 SciMLBase = "0bca4576-84f4-4d90-8ffe-ffa030f20462"
 Setfield = "efcf1570-3423-57d1-acb7-fd33fddbac46"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
@@ -34,6 +35,7 @@ ModelingToolkitBase = "1.37"
 Moshi = "0.3"
 OffsetArrays = "1"
 OrderedCollections = "1.8.1"
+Random = "1"
 SciMLBase = "2.108, 3"
 Setfield = "0.7, 0.8, 1"
 SparseArrays = "1"
@@ -47,7 +49,8 @@ julia = "1.10"
 [extras]
 ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
 ModelingToolkit = "961ee093-0014-501f-94e3-6117800e7a78"
+SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["Test", "ModelingToolkit", "ForwardDiff"]
+test = ["Test", "ModelingToolkit", "ForwardDiff", "SparseArrays"]

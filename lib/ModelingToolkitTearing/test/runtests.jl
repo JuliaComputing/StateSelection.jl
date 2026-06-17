@@ -11,6 +11,7 @@ import SymbolicUtils as SU
 using SymbolicUtils: unwrap
 using Setfield
 using ForwardDiff
+import SparseArrays
 
 @testset "`InferredDiscrete` validation" begin
     k = ShiftIndex()
@@ -169,6 +170,124 @@ end
             D(p) ~ 2y + 3w + z
         ], t
     ) reassemble_alg = MTKTearing.DefaultReassembleAlgorithm(; inline_linear_sccs = true)
+end
+
+@testset "`__reduce_linear_system!` preserves the full-system residual" begin
+    SymT = Symbolics.SymbolicT
+    MVT = StateSelection.MatchedVarT
+
+    # Build the 4×4 SCC described in issue #98's plan. Variables x1..x4, equations e1..e4:
+    #   e1:  2*x2              = 0        # eliminates x2 (matched, const coeffs)
+    #   e2:  -3*x2 + x3        = 0        # eliminates x3 via x2 -> transitive chain
+    #   e3:  x1 + x2 + x3 + x4 = p        # RETAINED, references two eliminated vars, symbolic RHS
+    #   e4:  x1 + x4           = p        # RETAINED, makes the reduced block rank-deficient
+    # Matching: x2->e1, x3->e2 (eliminated); x1,x4 unassigned => e3,e4 retained.
+    @variables p
+    mkA() = StateSelection.CLIL.SparseMatrixCLIL{Num, Int}(
+        4, 4, collect(1:4),
+        [[2], [2, 3], [1, 2, 3, 4], [1, 4]],
+        [Num[2.0], Num[-3.0, 1.0], Num[1.0, 1.0, 1.0, 1.0], Num[1.0, 1.0]])
+    mkb() = SymT[unwrap(Num(0)), unwrap(Num(0)), unwrap(p), unwrap(p)]
+    vem = BipartiteGraphs.complete(
+        BipartiteGraphs.Matching{MVT}(Union{MVT, Int}[BipartiteGraphs.unassigned, 1, 2, BipartiteGraphs.unassigned]),
+        4)
+
+    Ar, br, em, vm = MTKTearing.__reduce_linear_system!(mkA(), mkb(), vem, collect(1:4), collect(1:4))
+
+    @test em == Bool[0, 0, 1, 1]
+    @test vm == Bool[1, 0, 0, 1]
+
+    # The reduction is exact: x2=0, x3=0, so both retained rows become `x1 + x4 = p`.
+    subs = Dict{Any, Float64}(unwrap(p) => 3.7)
+    ev(x) = MTKTearing._evalnum(x, subs)
+    @test ev.(collect(Ar)) == [1.0 1.0; 1.0 1.0]   # rank-deficient (rank 1), as expected
+    @test ev.(br) ≈ [3.7, 3.7]                      # consistent: b in range(A)
+
+    # Exercise the opt-in self-check code path end-to-end (snapshot + identity + rank report).
+    local res
+    withenv("MTKTEARING_CHECK_REDUCTION" => "1") do
+        res = MTKTearing.__reduce_linear_system!(mkA(), mkb(), vem, collect(1:4), collect(1:4))
+    end
+    @test res[3] == Bool[0, 0, 1, 1]
+end
+
+@testset "`_reduction_identity_ok` detects reduction errors" begin
+    SymT2 = Symbolics.SymbolicT
+    @variables p
+    # Full 2×2 system: e1: 2*x1 = p (eliminate x1), e2: x1 + x2 = 0 (retain x2).
+    # Correct reduction: x1 = p/2, so e2 becomes x2 = -p/2.
+    A0 = Num[2.0 0.0; 1.0 1.0]
+    b0 = SymT2[unwrap(p), unwrap(Num(0))]
+    aliases = Dict{Int, SparseArrays.SparseVector{Num, Int}}(1 => SparseArrays.spzeros(Num, 2))
+    constants = Dict{Int, SymT2}(1 => unwrap(p / 2))
+    eqs_mask = BitVector([false, true])
+    vars_mask = BitVector([false, true])
+    old_to_new_eq = [0, 1]
+
+    A_red = Num[1.0;;]
+    b_red_good = SymT2[unwrap(-p / 2)]
+    @test MTKTearing._reduction_identity_ok(
+        A0, b0, A_red, b_red_good, aliases, constants, eqs_mask, vars_mask, old_to_new_eq)
+
+    # A wrong RHS (off by a constant) must be caught.
+    b_red_bad = SymT2[unwrap(-p / 2 + 1)]
+    bad = @test_logs (:warn,) match_mode = :any MTKTearing._reduction_identity_ok(
+        A0, b0, A_red, b_red_bad, aliases, constants, eqs_mask, vars_mask, old_to_new_eq)
+    @test bad == false
+end
+
+@testset "`_group_inline_linear_families` merges coupled rank-deficible blocks" begin
+    @variables a(t) b(t) c(t) d(t)
+    @parameters p
+    # Equations indexed 1..4. Blocks 1,2,4 reference the `maybe_zeros` parameter `p`
+    # (their rank can drop); block 3 does not.
+    neweqs = [
+        p * a ~ 0,        # eq1
+        0 ~ b - p * a,    # eq2  (couples to block 1's variable below)
+        0 ~ c - a,        # eq3  (no `p`)
+        0 ~ d - p * c,    # eq4
+    ]
+    prepared = NTuple{2, Vector{Int}}[([1], [1]), ([2], [2]), ([3], [3]), ([4], [4])]
+    g = BipartiteGraph(4, 4)
+    add_edge!(g, BipartiteEdge(2, 1))  # block 2's equation references block 1's variable
+    # (block 4 is intentionally NOT coupled to block 3)
+    mz = Symbolics.SymbolicT[unwrap(p)]
+
+    # Coupled + rank-deficible blocks 1,2 merge; block 3 (not deficible) and block 4
+    # (not coupled to blocks 1,2) stay separate.
+    @test MTKTearing._group_inline_linear_families(prepared, mz, neweqs, g, false, true) ==
+          [[1, 2], [3], [4]]
+
+    # No `maybe_zeros` => no grouping at all (default one-block-per-SCC behaviour).
+    @test MTKTearing._group_inline_linear_families(prepared, Symbolics.SymbolicT[], neweqs, g, false, true) ==
+          [[1], [2], [3], [4]]
+    # Discrete or inline-linear disabled => singletons.
+    @test MTKTearing._group_inline_linear_families(prepared, mz, neweqs, g, true, true) ==
+          [[1], [2], [3], [4]]
+    @test MTKTearing._group_inline_linear_families(prepared, mz, neweqs, g, false, false) ==
+          [[1], [2], [3], [4]]
+
+    # Non-adjacent family members are connected through the dependency DAG. Blocks 1 and 3
+    # are rank-deficible; block 2 is not, but lies on the dependency path 1 → 2 → 3, so the
+    # path closure pulls it into the family.
+    neweqs2 = [
+        p * a ~ 0,        # block 1 (deficible)
+        0 ~ b - a,        # block 2 (not deficible, on the path between 1 and 3)
+        0 ~ c - p * b,    # block 3 (deficible)
+    ]
+    prepared2 = NTuple{2, Vector{Int}}[([1], [1]), ([2], [2]), ([3], [3])]
+    g2 = BipartiteGraph(3, 3)
+    add_edge!(g2, BipartiteEdge(2, 1))   # block 2's equation references block 1's variable
+    add_edge!(g2, BipartiteEdge(3, 2))   # block 3's equation references block 2's variable
+    @test MTKTearing._group_inline_linear_families(prepared2, mz, neweqs2, g2, false, true) ==
+          [[1, 2, 3]]
+
+    # An unrelated block between two family members is NOT pulled in (no path through it),
+    # and the family is emitted before it (contracted topological order, stable by index).
+    g3 = BipartiteGraph(3, 3)
+    add_edge!(g3, BipartiteEdge(3, 1))   # block 3's equation references block 1's variable
+    @test MTKTearing._group_inline_linear_families(prepared2, mz, neweqs2, g3, false, true) ==
+          [[1, 3], [2]]
 end
 
 @testset "`system_subset(::SystemStructure)` subsets `.state_priorities`" begin

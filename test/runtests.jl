@@ -5,6 +5,17 @@ using Test
 
 include("bareiss.jl")
 include("carpanzano_tearing.jl")
+include("dummy_derivative_blocks.jl")
+
+# A value type whose `Base.iszero` is "semantic" and must never be consulted by
+# `dropzeros!` — stands in for symbolic value types (e.g. `Symbolics.Num`),
+# where the semantic zero test is arbitrarily expensive. `dropzeros!` must go
+# through the `cheap_iszero` hook instead.
+struct SemanticZero
+    x::Int
+end
+Base.iszero(::SemanticZero) = error("semantic iszero must not be called by dropzeros!")
+SSel.CLIL.cheap_iszero(v::SemanticZero) = v.x == 0
 
 @testset "`get_new_mm`" begin
     mm = SSel.CLIL.SparseMatrixCLIL(
@@ -71,4 +82,12 @@ include("carpanzano_tearing.jl")
     mm2 = SSel.get_new_mm(aliases, old_to_new_eq, old_to_new_var, mm)
     @test mm2.row_cols == [[2]]
     @test mm2.row_vals == [[1]]
+end
+
+@testset "`dropzeros!` uses the `cheap_iszero` hook" begin
+    mm = SSel.CLIL.SparseMatrixCLIL{SemanticZero, Int}(
+        1, 2, [1], [[1, 2]], [[SemanticZero(0), SemanticZero(3)]])
+    SparseArrays.dropzeros!(mm)
+    @test mm.row_cols == [[2]]
+    @test map(v -> v.x, only(mm.row_vals)) == [3]
 end
