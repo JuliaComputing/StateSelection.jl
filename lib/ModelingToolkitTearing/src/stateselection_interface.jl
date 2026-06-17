@@ -228,6 +228,9 @@ function _check_allow_symbolic_parameter(
     return true
 end
 
+
+const _SUPPORTS_NEED_REMAINDER = isdefined(Symbolics, :SUPPORTS_LINEAR_EXPANDER_NEED_REMAINDER)
+
 function StateSelection.find_eq_solvables!(state::TearingState, ieq, to_rm = Int[], coeffs = nothing;
         # this used to be `false`, but I can't find a place where this is called
         # that doesn't want to remove false incidences, and it fixes several bugs.
@@ -259,7 +262,11 @@ function StateSelection.find_eq_solvables!(state::TearingState, ieq, to_rm = Int
     for j in 𝑠neighbors(graph, ieq)
         var = fullvars[j]
         MTKBase.isirreducible(var) && (all_int_vars = false; continue)
-        a, b, islinear = MTKBase.get_linear_expander_for!(sys, var, true)(term)
+        # Once `all_int_vars` is false the equation can't enter the integer-linear
+        # subsystem, so the remainder (needed only for peeling/homogeneity) is dead
+        # weight — ask the expander to skip rebuilding it (when supported).
+        lex = MTKBase.get_linear_expander_for!(sys, var, true)
+        a, b, islinear = _SUPPORTS_NEED_REMAINDER ? lex(term; need_remainder = all_int_vars) : lex(term)
         islinear || (all_int_vars = false; continue)
         if !SU.isconst(a)
             all_int_vars = false
@@ -275,7 +282,11 @@ function StateSelection.find_eq_solvables!(state::TearingState, ieq, to_rm = Int
         end
         # When the expression is linear with numeric `a`, then we can safely
         # only consider `b` for the following iterations.
-        term = b
+        if _SUPPORTS_NEED_REMAINDER
+            all_int_vars && (term = b)
+        else
+            term = b
+        end
         a = manual_dispatch_is_small_int(unwrap_const(a))::Int
         if a == typemin(Int)
             all_int_vars = false
