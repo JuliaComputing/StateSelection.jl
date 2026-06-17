@@ -55,6 +55,9 @@ abstract type ReassembleAlgorithm end
 
 include("reassemble.jl")
 
+export inline_linear_systems, InlineLinearSystem
+include("diagnostics.jl")
+
 struct UnhackSystemCacheKey end
 
 function MTKBase.should_invalidate_mutable_cache_entry(::Type{UnhackSystemCacheKey}, patch::NamedTuple)
