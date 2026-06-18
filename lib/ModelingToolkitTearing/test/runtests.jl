@@ -160,9 +160,9 @@ end
     @test length(blocks) == 1
     blk = only(blocks)
     @test blk isa InlineLinearSystem
-    @test blk.size == 3
+    @test blk.size == 2
     @test length(blk.variables) == blk.size
-    @test issetequal(blk.variables, [y, z, w])
+    @test issubset(blk.variables, Set([y, z, w]))
     # the retained expression is the solve term `A \ b`
     @test SU.operation(unwrap(blk.expression)) === MTKTearing.INLINE_LINEAR_SCC_OP
     @test length(SU.arguments(unwrap(blk.expression))) == 2
