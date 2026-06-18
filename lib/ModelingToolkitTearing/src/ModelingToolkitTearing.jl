@@ -53,6 +53,9 @@ A reassemble algorithm must also implement `with_fully_determined`
 """
 abstract type ReassembleAlgorithm end
 
+export inline_linear_systems, InlineLinearSystem
+include("diagnostics.jl")
+
 include("reassemble.jl")
 
 struct UnhackSystemCacheKey end

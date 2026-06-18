@@ -141,6 +141,37 @@ end
     end
 end
 
+@testset "`inline_linear_systems` diagnostic" begin
+    @variables x(t) y(t) z(t) w(t) q(t)
+    ralg = MTKTearing.DefaultReassembleAlgorithm(; inline_linear_sccs = true)
+    # The algebraic SCC (y, z, w) is solved as one inline linear system.
+    @mtkcompile sys = System(
+        [
+            D(x) ~ 2t + 1,
+            t * y + x * z + w ~ 4,
+            4y + 3z + 2w ~ 7,
+            2x * y + 3t * z + w ~ 10,
+            D(q) ~ 2w,
+        ],
+        t
+    ) reassemble_alg = ralg
+
+    blocks = inline_linear_systems(sys)
+    @test length(blocks) == 1
+    blk = only(blocks)
+    @test blk isa InlineLinearSystem
+    @test blk.size == 3
+    @test length(blk.variables) == blk.size
+    @test issetequal(blk.variables, [y, z, w])
+    # the retained expression is the solve term `A \ b`
+    @test SU.operation(unwrap(blk.expression)) === MTKTearing.INLINE_LINEAR_SCC_OP
+    @test length(SU.arguments(unwrap(blk.expression))) == 2
+
+    # a system with no inline linear solve yields no blocks
+    @mtkcompile sys2 = System([D(x) ~ x], t)
+    @test isempty(inline_linear_systems(sys2))
+end
+
 @testset "`find_eq_solvables!` with `may_be_zero = true` doesn't push 0 elements to `coeffs`" begin
     @variables x y z
     @named sys = System([x + y + z ~ 0])

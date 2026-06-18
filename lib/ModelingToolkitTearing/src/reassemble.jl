@@ -411,6 +411,10 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
 
     eq_generator = EquationGenerator(state, total_sub, D, iv)
 
+    # Inline linear-solve blocks recorded as they are emitted, for the
+    # `inline_linear_systems` diagnostic (stored in the system metadata below).
+    inline_blocks = InlineLinearSystem[]
+
     # We need to solve extra equations before everything to repsect
     # topological order.
     for eq in extra_eqs
@@ -456,6 +460,10 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
             @assert length(vars_mask) == length(vscc)
             _escc = escc[eqs_mask]
             _vscc = vscc[vars_mask]
+            # `linsol` is the `A \ b` term (runtime path); component `j` is solved
+            # for the variable assigned below. The analytical path returns a
+            # `Const`-wrapped vector instead, which is not reported.
+            block_vars = Vector{SymbolicT}(nothing, length(_vscc))
             for (j, (ieq, iv)) in enumerate(zip(_escc, _vscc))
                 ∫iv = diff_to_var[iv]
                 rhs = linsol[j]
@@ -476,12 +484,18 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
                     end
 
                     total_sub[dx] = rhs
+                    block_vars[j] = dx
                 else
                     var = substitute(fullvars[iv], total_sub)
                     eq = var ~ rhs
                     push!(eq_generator.solved_eqs, eq)
                     push!(eq_generator.solved_vars, iv)
+                    block_vars[j] = var
                 end
+            end
+            if SU.iscall(linsol) && SU.operation(linsol) === INLINE_LINEAR_SCC_OP
+                push!(inline_blocks,
+                    InlineLinearSystem(length(_vscc), block_vars, linsol))
             end
 
             # Add the eliminated equations later so that the preceding loop
@@ -539,7 +553,7 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
     var_ordering = [var_ordering; setdiff(1:ndsts(graph), var_ordering, solved_vars_set)]
     neweqs = neweqs′
     return neweqs, solved_eqs, eq_ordering, var_ordering, length(solved_vars),
-    length(solved_vars_set)
+    length(solved_vars_set), inline_blocks
 end
 
 const INLINE_LINEAR_SCC_OP = (\)
@@ -1340,7 +1354,8 @@ function (alg::DefaultReassembleAlgorithm)(state::TearingState,
         eq_ordering,
         var_ordering,
         nelim_eq,
-        nelim_var = generate_system_equations!(
+        nelim_var,
+        inline_blocks = generate_system_equations!(
             state, neweqs, var_eq_matching, full_var_eq_matching,
             var_sccs, extra_eqs_vars, iv, D; simplify, inline_linear_sccs,
             analytical_linear_scc_limit, allow_symbolic, allow_parameter)
@@ -1356,7 +1371,8 @@ function (alg::DefaultReassembleAlgorithm)(state::TearingState,
             eq_ordering,
             var_ordering,
             nelim_eq,
-            nelim_var = generate_system_equations!(
+            nelim_var,
+            inline_blocks = generate_system_equations!(
                 state, neweqs, var_eq_matching, full_var_eq_matching,
                 var_sccs, extra_eqs_vars, iv, D; simplify, inline_linear_sccs,
                 analytical_linear_scc_limit)
@@ -1368,6 +1384,7 @@ function (alg::DefaultReassembleAlgorithm)(state::TearingState,
             extra_unknowns, iv, D; array_hack)
     end
 
+    sys = SU.setmetadata(sys, InlineLinearSystemsMetadata, inline_blocks)
     @set! state.sys = sys
     @set! sys.tearing_state = state
     return MTKBase.invalidate_cache!(sys)
