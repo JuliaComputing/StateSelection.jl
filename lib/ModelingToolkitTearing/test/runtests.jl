@@ -160,7 +160,6 @@ end
     @test length(blocks) == 1
     blk = only(blocks)
     @test blk isa InlineLinearSystem
-    @test blk.operation === (\)
     @test blk.size == 3
     @test length(blk.variables) == blk.size
     @test issetequal(blk.variables, [y, z, w])

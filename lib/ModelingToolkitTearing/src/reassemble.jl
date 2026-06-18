@@ -459,7 +459,7 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
             # `linsol` is the `A \ b` term (runtime path); component `j` is solved
             # for the variable assigned below. The analytical path returns a
             # `Const`-wrapped vector instead, which is not reported.
-            block_vars = Vector{Any}(nothing, length(_vscc))
+            block_vars = Vector{SymbolicT}(nothing, length(_vscc))
             for (j, (ieq, iv)) in enumerate(zip(_escc, _vscc))
                 ∫iv = diff_to_var[iv]
                 rhs = linsol[j]
@@ -491,7 +491,7 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
             end
             if SU.iscall(linsol) && SU.operation(linsol) === INLINE_LINEAR_SCC_OP
                 push!(inline_blocks,
-                    InlineLinearSystem(SU.operation(linsol), length(_vscc), block_vars, linsol))
+                    InlineLinearSystem(length(_vscc), block_vars, linsol))
             end
 
             # Add the eliminated equations later so that the preceding loop
@@ -1377,7 +1377,6 @@ function (alg::DefaultReassembleAlgorithm)(state::TearingState,
             extra_unknowns, iv, D; array_hack)
     end
 
-    sort!(inline_blocks; by = b -> b.size, rev = true)
     sys = SU.setmetadata(sys, InlineLinearSystemsMetadata, inline_blocks)
     @set! state.sys = sys
     @set! sys.tearing_state = state

@@ -14,8 +14,6 @@ $(TYPEDFIELDS)
 See [`inline_linear_systems`](@ref).
 """
 struct InlineLinearSystem
-    "The solve operation (`\\`)."
-    operation::Function
     "Dimension `N` of the square `N×N` linear system."
     size::Int
     """
@@ -23,22 +21,22 @@ struct InlineLinearSystem
     vector. An entry is `nothing` if that solution component is not assigned to a
     variable (it should not normally occur).
     """
-    variables::Vector{Any}
+    variables::Vector{SymbolicT}
     """
     The symbolic solve expression `A \\ b` (its `arguments` are the coefficient
     matrix `A` and the right-hand side `b`), retained so callers can inspect or
     numerically evaluate `A`, e.g. to check its conditioning.
     """
-    expression::Any
+    expression::SymbolicT
 end
 
 function Base.show(io::IO, blk::InlineLinearSystem)
-    print(io, blk.size, "×", blk.size, " ", nameof(blk.operation), " block")
+    print(io, blk.size, "×", blk.size, " ", nameof(operation(blk.expression)), " block")
 end
 
 function Base.show(io::IO, ::MIME"text/plain", blk::InlineLinearSystem)
     println(io, blk.size, "×", blk.size, " inline linear system (",
-            nameof(blk.operation), ") solving:")
+            nameof(operation(blk.expression)), ") solving:")
     for (i, v) in enumerate(blk.variables)
         println(io, "  [", i, "] ", v === nothing ? "(unassigned)" : v)
     end
@@ -68,5 +66,5 @@ block can be traced to the physical quantities it determines. Returns an empty v
 when `sys` emits no inline linear solves.
 """
 function inline_linear_systems(sys::MTKBase.AbstractSystem)
-    return SU.getmetadata(sys, InlineLinearSystemsMetadata, InlineLinearSystem[])
+    return SU.getmetadata(sys, InlineLinearSystemsMetadata, InlineLinearSystem[])::Vector{InlineLinearSystem}
 end
