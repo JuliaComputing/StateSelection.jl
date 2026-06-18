@@ -425,6 +425,10 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
               (var_to_diff[i] !== nothing && !isempty(𝑑neighbors(graph, var_to_diff[i]))))
     end
 
+    # NOTE: `state.structure.graph` should be accurate despite `generate_system_equations!`
+    # mutating the graph (when generating differential equations/populating `total_sub`).
+    # If the graph disagrees with symbolic incidence at any point during the execution of
+    # this function, then there is some invalid operation happening on the graph.
     digraph = DiCMOBiGraph{false}(graph, var_eq_matching)
     for (i, scc) in enumerate(var_sccs)
         # note that the `vscc <-> escc` relation is a set-to-set mapping, and not
