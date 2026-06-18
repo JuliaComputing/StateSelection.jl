@@ -740,7 +740,6 @@ function __reduce_linear_system!(A::StateSelection.CLIL.SparseMatrixCLIL{Num, In
     constants = Dict{Int, SymbolicT}()
     aliases = Dict{Int, SparseArrays.SparseVector{Num, Int}}()
     for (i, coeffs) in enumerate(A.row_vals)
-        all(SU.isconst ∘ unwrap, coeffs) || continue
         eq_var_matching[alg_eqs[i]] isa Int || continue
 
         eqs_mask[i] = false
