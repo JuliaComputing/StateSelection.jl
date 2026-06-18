@@ -622,10 +622,35 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
         b[eqidx] = resid
     end
 
+    # Per-equation incidence is read off the actual `total_sub`-substituted residual rather
+    # than the structural incidence `graph`. The `graph` is built before substitution and is
+    # mutated during reassembly, so it can desync from the residual once `total_sub`
+    # reintroduces an SCC variable (e.g. chaining rotation-matrix orientation states pulls a
+    # propagated angular velocity, hence the Euler-angle rate, into the residual of an
+    # equation whose structural edge was already torn). Gating extraction on the stale
+    # `graph` then skips expanding that variable into the coefficient matrix `A`, leaving it
+    # buried in `b`; it is subsequently smuggled onto the RHS by `__reduce_linear_system!`
+    # (which inspects only the coefficient row, never `b`), producing a self-referential
+    # `A \ b` whose observed equations cannot be topologically ordered
+    # (SciML/ModelingToolkit.jl#4608, issue #98). Gating on the residual's real incidence
+    # expands every present SCC variable into `A`, keeping `b` free of SCC variables by
+    # construction.
+    resid_atoms = Vector{Set{SymbolicT}}(undef, length(b))
+    for eqidx in eachindex(b)
+        s = Set{SymbolicT}()
+        Symbolics.get_variables!(s, b[eqidx])
+        resid_atoms[eqidx] = s
+    end
     for (varidx, var) in enumerate(vars)
+        var_atoms = Set{SymbolicT}()
+        Symbolics.get_variables!(var_atoms, var)
         lex = MTKBase.get_linear_expander_for!(sys, var, true)
         for (eqidx, resid) in enumerate(b)
-            Graphs.has_edge(graph, BipartiteEdge(alg_eqs[eqidx], alg_vars[varidx])) || continue
+            # Skip only when the SCC variable is genuinely absent from this residual. The
+            # residual is mutated to `q` (the remainder after extraction) below; since
+            # extraction never introduces new variables into `q`, the pre-loop `resid_atoms`
+            # snapshot is a sound (tight) over-approximation of what is still present.
+            isdisjoint(var_atoms, resid_atoms[eqidx]) && continue
             p, q, islinear = lex(resid)
             islinear || return nothing
             if !SU._iszero(p)
@@ -637,13 +662,9 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
         end
     end
 
-    # The `has_edge` gate above relies on the structural incidence `graph`, which is mutated
-    # during reassembly and could in principle desync from the `total_sub`-substituted
-    # residual, leaving a live SCC variable buried inside some `b[eqidx]`. Such a variable
-    # would be smuggled onto the RHS of retained equations by `__reduce_linear_system!`
-    # (which inspects only the coefficient row, never `b`), producing an inconsistent runtime
-    # `A \ b` (issue #98). The construction is expected to keep `b` free of all SCC
-    # variables; when the self-check is enabled, assert it so any regression surfaces loudly.
+    # With residual-incidence gating above, `b` is free of all SCC variables by
+    # construction. The opt-in self-check asserts this invariant so any regression
+    # (e.g. a future change reintroducing structural-graph gating) surfaces loudly.
     _inline_scc_check_enabled() && _assert_b_free_of_scc_vars(b, vars)
 
     # `-` is important! `b` is on the other side of the equality.
