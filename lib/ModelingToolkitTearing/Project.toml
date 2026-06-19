@@ -1,7 +1,7 @@
 name = "ModelingToolkitTearing"
 uuid = "6bb917b9-1269-42b9-9f7c-b0dca72083ab"
 version = "1.15.0"
-authors = ["Aayush Sabharwal <aayush.sabharwal@gmail.com>"]
+authors = ["Aayush Sabharwal <aayush.sabharwal@juliahub.com>"]
 
 [deps]
 BipartiteGraphs = "caf10ac8-0290-4205-88aa-f15908547e8d"
