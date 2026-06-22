@@ -281,6 +281,9 @@ function dummy_derivative_graph!(
                 sortperm!(var_perm, sp)
                 permute!(vars, var_perm)
                 permute!(sp, var_perm)
+                # keep the Jacobian columns aligned with the permuted variable
+                # order; `col_order` below indexes into `vars` (#102)
+                J === nothing || (J = J[:, var_perm])
                 push!(var_dummy_scc, copy(vars))
                 push!(var_state_priority, sp)
             end
