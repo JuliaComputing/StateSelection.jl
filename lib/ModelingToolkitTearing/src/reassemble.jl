@@ -394,7 +394,20 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
     diff_to_var = invview(var_to_diff)
     extra_eqs, extra_vars = extra_eqs_vars
 
-    total_sub = MTKBase.DerivativeDict()
+    total_sub = MTKBase.ExpandDerivativeDict()
+    # ENV-gated diagnostic: dump the torn (unassigned) variables, i.e. the
+    # tear/iteration variables of this tearing result, with their names.
+    if haskey(ENV, "MTKT_DUMP_TORN")
+        open(ENV["MTKT_DUMP_TORN"], "a") do io
+            println(io, "TORNSET n_vars=", length(fullvars))
+            for (v, m) in enumerate(var_eq_matching)
+                v <= length(fullvars) || continue
+                if m === StateSelection.unassigned
+                    println(io, "  TORN ", fullvars[v])
+                end
+            end
+        end
+    end
     is_disc = StateSelection.is_only_discrete(structure)
     if is_disc
         for (i, v) in enumerate(fullvars)
@@ -429,6 +442,7 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
               (var_to_diff[i] !== nothing && !isempty(𝑑neighbors(graph, var_to_diff[i]))))
     end
 
+    var_to_idx = Dict{SymbolicT, Int}(fullvars .=> eachindex(fullvars))
     # NOTE: `state.structure.graph` should be accurate despite `generate_system_equations!`
     # mutating the graph (when generating differential equations/populating `total_sub`).
     # If the graph disagrees with symbolic incidence at any point during the execution of
@@ -464,6 +478,7 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
             # for the variable assigned below. The analytical path returns a
             # `Const`-wrapped vector instead, which is not reported.
             block_vars = Vector{SymbolicT}(nothing, length(_vscc))
+            new_incidence = map(Base.Fix1(getindex, var_to_idx), collect(Symbolics.get_variables(linsol, fullvars)))::Vector{Int}
             for (j, (ieq, iv)) in enumerate(zip(_escc, _vscc))
                 ∫iv = diff_to_var[iv]
                 rhs = linsol[j]
@@ -475,9 +490,9 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
                     push!(eq_generator.neweqs′, eq)
                     push!(eq_generator.eq_ordering, ieq)
                     push!(eq_generator.var_ordering, ∫iv)
-                    for e in 𝑑neighbors(graph, iv)
+                    for e in copy(𝑑neighbors(graph, iv))
                         e == ieq && continue
-                        for v in 𝑠neighbors(graph, ieq)
+                        for v in new_incidence
                             add_edge!(graph, e, v)
                         end
                         rem_edge!(graph, e, iv)
@@ -573,12 +588,14 @@ All equations not used in the linear system must be solved as normal.
 function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
                                alg_vars::Vector{Int}, neweqs::Vector{Equation},
                                var_eq_matching::StateSelection.VarEqMatchingT,
-                               total_sub::MTKBase.DerivativeDict{SymbolicT, Dict{SymbolicT, SymbolicT}},
+                               total_sub::MTKBase.ExpandDerivativeDict{SymbolicT, Dict{SymbolicT, SymbolicT}},
                                analytical_linear_scc_limit::Int,
                                simplify::Bool; allow_symbolic::Bool = false,
                                allow_parameter::Bool = true)
     (; fullvars, sys, structure) = state
-    (; graph) = structure
+    (; graph, solvable_graph, var_to_diff) = structure
+    diff_to_var = invview(var_to_diff)
+    D = Differential(MTKBase.get_iv(sys)::SymbolicT)
 
     # If the SCC is fully torn, don't bother generating a linsolve
     all_torn = true
@@ -588,8 +605,21 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
     all_torn && return nothing
 
     N = length(alg_eqs)
-    vars = Symbolics.fixpoint_sub(fullvars[alg_vars], total_sub; maxiters = max(length(total_sub), 10))
+    vars = fullvars[alg_vars]
 
+    for i in eachindex(vars)
+        ivar = alg_vars[i]
+        ieq = var_eq_matching[ivar]
+        ieq isa Int || continue
+        issolvable = Graphs.has_edge(solvable_graph, BipartiteEdge(ieq, ivar))
+        issolvable || continue
+        isdervar = StateSelection.isdervar(state.structure, ivar)
+        isdervar || continue
+        order, lv = var_order(ivar, diff_to_var)
+        vars[i] = D(fullvars[lv])
+    end
+
+    subber = Symbolics.FixpointSubstituter{false}(total_sub; maxiters = max(length(total_sub), 10))
     A = StateSelection.CLIL.SparseMatrixCLIL{Num, Int}(N, N, collect(1:N), map(_ -> Int[], 1:N), map(_ -> Num[], 1:N))
     b = fill(Symbolics.COMMON_ZERO, N)
 
@@ -603,10 +633,7 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
         if simplify
             resid = Symbolics.simplify(resid)
         end
-        # Substitute solved differential equations
-        resid = Symbolics.fixpoint_sub(
-            resid, total_sub, MTKBase.Shift; maxiters = max(2length(total_sub), 10))
-        b[eqidx] = resid
+        b[eqidx] = subber(resid)
     end
 
     for (varidx, var) in enumerate(vars)
@@ -893,7 +920,7 @@ struct EquationGenerator{S}
     Substitutions to perform in all subsequent equations. For each differential equation
     `D(x) ~ f(..)`, the substitution `D(x) => f(..)` is added to the rules.
     """
-    total_sub::MTKBase.DerivativeDict{SymbolicT, Dict{SymbolicT, SymbolicT}}
+    total_sub::MTKBase.ExpandDerivativeDict{SymbolicT, Dict{SymbolicT, SymbolicT}}
     """
     The differential operator, or `nothing` if not applicable.
     """
