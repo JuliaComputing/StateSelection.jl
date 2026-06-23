@@ -58,39 +58,22 @@ include("diagnostics.jl")
 
 include("reassemble.jl")
 
-struct UnhackSystemCacheKey end
+abstract type InlineLinsolveTransformation <: MTKBase.ReversibleTransformations end
 
-function MTKBase.should_invalidate_mutable_cache_entry(::Type{UnhackSystemCacheKey}, patch::NamedTuple)
+function MTKBase.should_invalidate_mutable_cache_entry(
+        ::Type{InlineLinsolveTransformation}, patch::NamedTuple
+    )
     return true
 end
 
-function MTKBase.unhack_system(sys::System)
-    cached_sys = MTKBase.check_mutable_cache(sys, UnhackSystemCacheKey, System, nothing)
+function MTKBase.reverse_transformation(sys, ::Type{InlineLinsolveTransformation})
+    cached_sys = MTKBase.check_mutable_cache(sys, InlineLinsolveTransformation, System, nothing)
     if cached_sys isa System
         return cached_sys
     end
-    # Observed are copied by the masking operation
+
     obseqs = observed(sys)
     eqs = copy(equations(sys))
-    obs_mask = trues(length(obseqs))
-    for (i, eq) in enumerate(obseqs)
-        obs_mask[i] = @match eq.rhs begin
-            BSImpl.Term(; f, args) => if f === change_origin
-                false
-            elseif f === SU.array_literal
-                result = true
-                for (si, ai) in zip(SU.stable_eachindex(eq.lhs), Iterators.drop(eachindex(args), 1))
-                    result &= isequal(eq.lhs[si], args[ai])
-                    result || break
-                end
-                !result
-            else
-                true
-            end
-            _ => true
-        end
-    end
-    obseqs = obseqs[obs_mask]
 
     # Map from ldiv operation to index of the equations where it is the RHS. A
     # positive index is into `obseqs`, a negative index is into `eqs`. The variable
@@ -107,8 +90,7 @@ function MTKBase.unhack_system(sys::System)
     # Now, we want to turn all inlined linear SCCs into algebraic equations. If an element
     # of the SCC is a differential variable, we'll introduce the `toterm` as a new algebraic.
     # Otherwise, the observed equation is removed.
-    resize!(obs_mask, length(obseqs))
-    fill!(obs_mask, true)
+    obs_mask = trues(length(obseqs))
     additional_eqs = Equation[]
     additional_vars = Set{SymbolicT}()
     additional_subs = Dict{SymbolicT, SymbolicT}()
@@ -171,7 +153,7 @@ function MTKBase.unhack_system(sys::System)
     @set! newsys.unknowns = dvs
     @set! newsys.schedule = sched
 
-    MTKBase.store_to_mutable_cache!(sys, UnhackSystemCacheKey, newsys)
+    MTKBase.store_to_mutable_cache!(sys, InlineLinsolveTransformation, newsys)
 
     return newsys
 end
