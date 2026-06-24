@@ -117,12 +117,14 @@ function permute(structure::SystemStructure, oldtonewvar::Vector{Int}, oldtonewe
 
     var_types = similar(structure.var_types)
     sps = similar(structure.state_priorities)
+    cranks = similar(structure.canonical_ranks)
     for i in 𝑑vertices(structure.graph)
         var_types[oldtonewvar[i]] = structure.var_types[i]
         sps[oldtonewvar[i]] = structure.state_priorities[i]
+        cranks[oldtonewvar[i]] = structure.canonical_ranks[i]
     end
 
-    return SystemStructure(var_to_diff, eq_to_diff, graph, solvable_graph, var_types, sps, structure.only_discrete)
+    return SystemStructure(var_to_diff, eq_to_diff, graph, solvable_graph, var_types, sps, cranks, structure.only_discrete)
 end
 
 """

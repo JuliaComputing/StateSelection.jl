@@ -20,7 +20,7 @@ function try_assign_eq!(ict::IncrementalCycleTracker, vars, v_active, eq::Intege
 end
 
 function tearEquations!(ict::IncrementalCycleTracker, Gsolvable, es::Vector{Int},
-        v_active::BitSet, isder′::F) where {F}
+        v_active::BitSet, isder′::F, varpriority::P = nothing) where {F, P}
     check_der = isder′ !== nothing
     if check_der
         has_der = Ref(false)
@@ -38,6 +38,16 @@ function tearEquations!(ict::IncrementalCycleTracker, Gsolvable, es::Vector{Int}
         for eq in es  # iterate only over equations that are not in eSolvedFixed
             vs = Gsolvable[eq]
             ((length(vs) == 1) ⊻ only_single_solvable) && continue
+            if varpriority !== nothing && length(vs) > 1
+                # Prefer solving the equation for the candidate with the LOWEST
+                # priority, so that high-priority variables remain tear
+                # (iteration) variables — mirroring the `state_priority`
+                # semantics of dummy-derivative state selection. The sort is
+                # stable, so behavior is unchanged whenever priorities are equal
+                # (e.g. all default 0). Do not mutate the graph's adjacency list.
+                vs = copy(vs)
+                sort!(vs; by = varpriority, alg = Base.Sort.DEFAULT_STABLE)
+            end
             if check_der
                 # if there're differentiated variables, then only consider them
                 try_assign_eq!(ict, vs, v_active, eq, isder)
@@ -54,8 +64,8 @@ function tearEquations!(ict::IncrementalCycleTracker, Gsolvable, es::Vector{Int}
 end
 
 function tear_graph_block_modia!(var_eq_matching, ict, solvable_graph, eqs, vars,
-        isder::F) where {F}
-    tearEquations!(ict, solvable_graph.fadjlist, eqs, vars, isder)
+        isder::F, varpriority::P = nothing) where {F, P}
+    tearEquations!(ict, solvable_graph.fadjlist, eqs, vars, isder, varpriority)
     for var in vars
         var_eq_matching[var] = ict.graph.matching[var]
     end
@@ -92,6 +102,8 @@ function tear_graph_modia(structure::SystemStructure, isder::F = nothing,
     # find them here [TODO: It would be good to have an explicit example of this.]
 
     (; graph, solvable_graph) = structure
+    varpriority = has_state_priorities(structure) ?
+        Base.Fix1(getindex, get_state_priorities(structure)) : nothing
     var_eq_matching = maximal_matching(graph, U,
         srcfilter=eqfilter,
         dstfilter=varfilter)
@@ -123,7 +135,7 @@ function tear_graph_modia(structure::SystemStructure, isder::F = nothing,
         end
         tear_graph_block_modia!(var_eq_matching, ict, solvable_graph, ieqs,
             filtered_vars,
-            isder)
+            isder, varpriority)
         update_full_var_eq_matching!(graph, full_var_eq_matching, var_eq_matching, vars, remaining_eqs; varfilter)
 
         # If the systems is overdetemined, we cannot assume the free equations

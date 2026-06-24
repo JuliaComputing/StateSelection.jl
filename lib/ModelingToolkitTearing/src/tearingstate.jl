@@ -21,6 +21,12 @@ Base.@kwdef mutable struct SystemStructure <: StateSelection.SystemStructure
     var_types::Vector{VariableType}
     """State priorities corresponding to each variable in `fullvars`"""
     state_priorities::Vector{Int}
+    """
+    Canonical rank of each variable in `fullvars`: the rank of the variable's name in
+    lexicographic order. Used as a deterministic tie-break (after priorities) in tearing,
+    so that results do not depend on equation/declaration order.
+    """
+    canonical_ranks::Vector{Int}
     """Whether the system is discrete."""
     only_discrete::Bool
 end
@@ -29,7 +35,8 @@ function Base.copy(structure::SystemStructure)
     var_types = structure.var_types === nothing ? nothing : copy(structure.var_types)
     SystemStructure(copy(structure.var_to_diff), copy(structure.eq_to_diff),
         copy(structure.graph), copy(structure.solvable_graph),
-        var_types, copy(structure.state_priorities), structure.only_discrete)
+        var_types, copy(structure.state_priorities), copy(structure.canonical_ranks),
+        structure.only_discrete)
 end
 
 StateSelection.is_only_discrete(s::SystemStructure) = s.only_discrete
@@ -399,6 +406,7 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
     graph = build_incidence_graph(length(fullvars), symbolic_incidence, var2idx)
 
     state_priorities = build_state_priorities(sys, fullvars, var_to_diff)
+    canonical_ranks = build_canonical_ranks(fullvars)
 
     # Identify unknowns that do not appear in any equations and are thus not present in
     # `fullvars`. The bindings and initial conditions for these variables should be removed.
@@ -422,10 +430,102 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
     eq_to_diff = StateSelection.DiffGraph(nsrcs(graph))
 
     structure = SystemStructure(complete(var_to_diff), complete(eq_to_diff),
-                                complete(graph), nothing, var_types, state_priorities, false)
+                                complete(graph), nothing, var_types, state_priorities,
+                                canonical_ranks, false)
     return TearingState(sys, fullvars, structure, Equation[], param_derivative_map,
                         no_deriv_params, original_eqs, Equation[], falses(length(fullvars)),
                         typeof(sys)[], sources)
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Total, allocation-light "canonical name" for any expression that may appear in
+`fullvars`: the name for named variables (`Sym` / call-variable / `getindex`),
+the operation's name for operator/function applications, and a fixed sentinel
+symbol for the remaining structural variants. Key collisions are acceptable —
+they only mean the canonical tie-break falls back to the original order among
+the colliding entries.
+"""
+function canonical_name(x::SymbolicT)
+    @match x begin
+        BSImpl.Sym(; name) => name
+        BSImpl.Term(; f, args) && if f === getindex end => canonical_name(args[1])
+        BSImpl.Term(; f) => canonical_opname(f)
+        BSImpl.AddMul(; variant) => variant === SU.AddMulVariant.ADD ? :+ : :*
+        BSImpl.Div(;) => :/
+        BSImpl.ArrayOp(;) => Symbol("#arrayop")
+        BSImpl.Const(;) => Symbol("#const")
+        _ => Symbol("#expr")
+    end
+end
+function canonical_opname(@nospecialize(f))
+    f isa SymbolicT && return canonical_name(f)
+    f isa Function && return nameof(f)::Symbol
+    return nameof(typeof(f))::Symbol
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Structured canonical sort key for a `fullvars` entry: a tuple
+`(name, indices, opsig)` where `name` is the [`canonical_name`](@ref) of the
+underlying (array) variable, `indices` are the integer indices when `v` is a
+scalarized array element (empty otherwise) and `opsig` encodes the operator
+chain wrapping the variable (`Differential` → `1`; `Shift` → `2` followed by
+its step count; any other single-argument operator → `3`). Comparing these
+tuples orders variables deterministically regardless of equation/declaration
+order, without stringifying symbolic expressions. Total: compound expressions
+(e.g. multi-argument clock operators over non-variable arguments) key off
+their operation name.
+"""
+function canonical_sort_key(v::SymbolicT)
+    # `opsig`/`idxs` are built as `Vector{Int}` (not growing tuples) so the key
+    # type is concrete and inferrable after the loop. Vectors compare
+    # lexicographically, so the tuple ordering is unchanged.
+    opsig = Int[]
+    x = v
+    while true
+        stripped = @match x begin
+            BSImpl.Term(; f, args) && if f isa Differential end => begin
+                push!(opsig, 1)
+                args[1]
+            end
+            BSImpl.Term(; f, args) && if f isa MTKBase.Shift end => begin
+                push!(opsig, 2, Int(f.steps))
+                args[1]
+            end
+            BSImpl.Term(; f, args) && if f isa SU.Operator && length(args) == 1 end => begin
+                push!(opsig, 3)
+                args[1]
+            end
+            _ => nothing
+        end
+        stripped === nothing && break
+        x = stripped
+    end
+    idxs = Int[]
+    @match x begin
+        BSImpl.Term(; f, args) && if f === getindex end => begin
+            for i in Iterators.drop(args, 1)
+                ival = SU.isconst(i) ? manual_dispatch_is_small_int(unwrap_const(i))::Int : 0
+                push!(idxs, ival)
+            end
+            x = args[1]
+        end
+        _ => nothing
+    end
+    return (canonical_name(x), idxs, opsig)
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Rank of each variable in `fullvars` under the [`canonical_sort_key`](@ref) order.
+Used as a deterministic tie-break (after priorities) in tearing.
+"""
+function build_canonical_ranks(fullvars::Vector{SymbolicT})
+    return invperm(sortperm(map(canonical_sort_key, fullvars)))
 end
 
 function build_state_priorities(sys::System, fullvars::Vector{SymbolicT}, var_to_diff::StateSelection.DiffGraph)
@@ -434,8 +534,16 @@ function build_state_priorities(sys::System, fullvars::Vector{SymbolicT}, var_to
     var_priorities = Int[]
     sizehint!(var_priorities, length(fullvars))
     for v in fullvars
-        arr, _ = MTKBase.split_indexed_var(v)
-        push!(var_priorities, get(sps, arr, 0))
+        # Component-granular lookup: a priority on the scalarized variable
+        # itself (e.g. `v_0[1] => 5`) takes precedence over a priority on its
+        # parent array variable. This allows distinguishing array components,
+        # which is impossible with the parent-array-only lookup.
+        p = get(sps, v, nothing)
+        if p === nothing
+            arr, _ = MTKBase.split_indexed_var(v)
+            p = get(sps, arr, 0)
+        end
+        push!(var_priorities, round(Int, p))
     end
 
     # Propagate priorities up the `var_to_diff` graph. Each variable's final priority is

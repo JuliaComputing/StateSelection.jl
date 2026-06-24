@@ -20,6 +20,8 @@ is_only_discrete(::SystemStructure) = false
 
 has_state_priorities(::T) where {T <: SystemStructure} = hasfield(T, :state_priorities)
 get_state_priorities(ss::SystemStructure) = ss.state_priorities
+has_canonical_ranks(::T) where {T <: SystemStructure} = hasfield(T, :canonical_ranks)
+get_canonical_ranks(ss::SystemStructure) = ss.canonical_ranks
 
 """
     $TYPEDEF
