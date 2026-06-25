@@ -266,22 +266,9 @@ function aag_bareiss!(structure, mm_orig::SparseMatrixCLIL{T, Ti}) where {T, Ti}
     solvable_variables = findall(is_linear_variables)
     var_priorities = has_state_priorities(structure) ? get_state_priorities(structure) : nothing
 
-    local bar
-    try
-        bar = do_bareiss!(mm, mm_orig, is_linear_variables, is_highest_diff, var_priorities)
-    catch e
-        e isa OverflowError || rethrow(e)
-        mm = convert(SparseMatrixCLIL{BigInt, Ti}, mm_orig)
-        bar = do_bareiss!(mm, mm_orig, is_linear_variables, is_highest_diff, var_priorities)
-    end
+    bar = do_bareiss!(mm, mm_orig, is_linear_variables, is_highest_diff, var_priorities)
 
-    # This phrasing infers the return type as `Union{Tuple{...}}` instead of
-    # `Tuple{Union{...}, ...}`
-    if mm isa SparseMatrixCLIL{BigInt, Ti}
-        return mm, solvable_variables, bar
-    else
-        return mm, solvable_variables, bar
-    end
+    return mm, solvable_variables, bar
 end
 
 "Column-swap no-op passed to `bareiss!` when using the virtual column-swap strategy."

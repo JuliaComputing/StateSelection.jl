@@ -298,7 +298,6 @@ function get_new_mm(
         mm::CLIL.SparseMatrixCLIL
     )
 
-    new_nparentrows = mm.nparentrows
     new_row_cols = eltype(mm.row_cols)[]
     new_row_vals = eltype(mm.row_vals)[]
     new_nzrows = Int[]
@@ -362,7 +361,7 @@ function get_new_mm(
 
     # Drop explicit zeros (e.g. from an alias that cancelled to zero) so they
     # don't survive as phantom structural nonzeros.
-    new_mm = typeof(mm)(new_nparentrows, count(!iszero, old_to_new_var), new_nzrows, new_row_cols, new_row_vals)
+    new_mm = typeof(mm)(count(!iszero, old_to_new_eq), count(!iszero, old_to_new_var), new_nzrows, new_row_cols, new_row_vals)
     return SparseArrays.dropzeros!(new_mm)
 end
 

@@ -1,3 +1,10 @@
+# NOTE: Checklist for adding new fields to `SystemStructure` or `TearingState`
+# - Is it populated in the `TearingState` constructor?
+# - Is it handled in the `copy` method?
+# - Is it updated in `var_derivative!`? (if necessary)
+# - Is it updated in `eq_derivative!`? (if necessary)
+# - Is it updated in `rm_eqs_vars!`? (if necessary)
+
 """
     $TYPEDEF
 
@@ -91,6 +98,11 @@ mutable struct TearingState <: StateSelection.TransformationState{System}
     or source information is unknown.
     """
     eqs_source::Vector{Vector{Symbol}}
+    """
+    A `SparseMatrixCLIL` identifying equations which are integer-coefficient linear
+    combinations of variables.
+    """
+    mm::Union{Nothing, CLIL.SparseMatrixCLIL{Int, Int}}
 end
 
 function Base.show(io::IO, state::TearingState)
@@ -434,7 +446,7 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
                                 canonical_ranks, false)
     return TearingState(sys, fullvars, structure, Equation[], param_derivative_map,
                         no_deriv_params, original_eqs, Equation[], falses(length(fullvars)),
-                        typeof(sys)[], sources)
+                        typeof(sys)[], sources, nothing)
 end
 
 """
@@ -522,10 +534,11 @@ end
     $TYPEDSIGNATURES
 
 Rank of each variable in `fullvars` under the [`canonical_sort_key`](@ref) order.
-Used as a deterministic tie-break (after priorities) in tearing.
+Used as a deterministic tie-break (after priorities) in tearing. Ranks are multiplied
+by a constant factor to enable inserting new variables in between.
 """
 function build_canonical_ranks(fullvars::Vector{SymbolicT})
-    return invperm(sortperm(map(canonical_sort_key, fullvars)))
+    return invperm(sortperm(map(canonical_sort_key, fullvars))) .* 100
 end
 
 function build_state_priorities(sys::System, fullvars::Vector{SymbolicT}, var_to_diff::StateSelection.DiffGraph)

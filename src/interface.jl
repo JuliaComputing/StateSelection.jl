@@ -190,7 +190,7 @@ function get_old_to_new_idxs(n_before::Int, dels::Vector{Int})
     for i in eachindex(old_to_new)
         if cursor <= ndels && i == dels[cursor]
             cursor += 1
-            old_to_new[i] = -1
+            old_to_new[i] = 0
             continue
         end
         idx += 1
