@@ -433,11 +433,14 @@ function StateSelection.rm_eqs_vars!(
     old_to_new_eq, old_to_new_var = StateSelection.default_rm_eqs_vars!(
         structure, eqs_to_rm, vars_to_rm; eqs_sorted_and_uniqued, vars_sorted_and_uniqued
     )
+    deleteat!(structure.canonical_ranks, vars_to_rm)
     deleteat!(structure.state_priorities, vars_to_rm)
     deleteat!(structure.var_types, vars_to_rm)
     return old_to_new_eq, old_to_new_var
 end
 
+# This does NOT update `state.mm` since it doesn't have `aliases` information. That is
+# the responsibility of the caller using `get_new_mm`.
 function StateSelection.rm_eqs_vars!(
         state::TearingState, eqs_to_rm::Vector{Int}, vars_to_rm::Vector{Int};
         eqs_sorted_and_uniqued::Bool = false, vars_sorted_and_uniqued::Bool = false
