@@ -7,13 +7,73 @@ function StateSelection.var_derivative!(ts::TearingState, v::Int)
     push!(ts.structure.state_priorities, ts.structure.state_priorities[v])
     push!(ts.structure.var_types, ts.structure.var_types[v])
     push!(ts.always_present, ts.always_present[v])
+    mm = ts.mm
+    if mm !== nothing
+        @set! mm.ncols += 1
+        ts.mm = mm
+    end
     return var_diff
+end
+
+function eq_derivative_mm!(ts::TearingState, ieq::Int, eq_diff::Int, idx::Int)
+    s = ts.structure
+    mm = ts.mm::CLIL.SparseMatrixCLIL{Int, Int}
+    eqs = equations(ts)
+
+    rcol = copy(mm.row_cols[idx])
+    rval = mm.row_vals[idx]
+    # Differentiate the variables involved
+    map!(Base.Fix1(getindex, s.var_to_diff), rcol, rcol)
+    # Add to `mm`
+    @assert eq_diff > last(mm.nzrows)
+    push!(mm.nzrows, eq_diff)
+    push!(mm.row_cols, rcol)
+    push!(mm.row_vals, rval)
+
+    # Rebuild the RHS. We know what structure this will take, so can again
+    # use a custom fast path.
+    add_dict = SU.ACDict{VartypeT}()
+    sizehint!(add_dict, length(rcol))
+    T = SU.promote_symtype(*, Int, SU.symtype(ts.fullvars[rcol[1]]))
+    for (iv, coeff) in zip(rcol, rval)
+        var = ts.fullvars[iv]
+        _T = SU.promote_symtype(*, Int, SU.symtype(var))
+        T = SU.promote_symtype(+, T, _T)
+        add_dict[var] = coeff
+    end
+    rhs = BSImpl.AddMul{VartypeT}(0, add_dict, SU.AddMulVariant.ADD; type = T, shape = SU.ShapeVecT())
+    eq = Symbolics.COMMON_ZERO ~ rhs
+    push!(eqs, eq)
+
+    @assert length(equations(ts)) == eq_diff
+
+    for v in rcol
+        add_edge!(s.graph, eq_diff, v)
+        if s.solvable_graph !== nothing
+            add_edge!(s.solvable_graph, eq_diff, v)
+        end
+    end
+
+    return eq_diff
 end
 
 function StateSelection.eq_derivative!(ts::TearingState, ieq::Int; kwargs...)
     s = ts.structure
 
     eq_diff = StateSelection.eq_derivative_graph!(s, ieq)
+
+    mm = ts.mm
+    if mm !== nothing
+        # Regardless of what we do, an additional equation is added to the system
+        @set! mm.nparentrows += 1
+        # Remember to set back into `ts`
+        ts.mm = mm
+
+        # Fast path. If we have `mm`, and the equation we're differentiating is present
+        # in `mm`, differentation is trivial.
+        idxs = searchsorted(mm.nzrows, ieq)
+        isempty(idxs) || return eq_derivative_mm!(ts, ieq, eq_diff, first(idxs))
+    end
 
     sys = ts.sys
     eqs = equations(ts)
@@ -51,10 +111,21 @@ function StateSelection.eq_derivative!(ts::TearingState, ieq::Int; kwargs...)
     # We already ran `search_variables!`, so we can identify the ones that
     # really need to be removed here.
     to_rm = Int[]
-    s.solvable_graph === nothing || StateSelection.find_eq_solvables!(
-        ts, eq_diff, to_rm; may_be_zero = true, allow_symbolic = false,
-        symbolically_rm_singular = false, kwargs...
-    )
+    coeffs = Int[]
+    solvable_graph = s.solvable_graph
+    if solvable_graph !== nothing
+        all_int_vars, rhs = StateSelection.find_eq_solvables!(
+            ts, eq_diff, to_rm, coeffs; may_be_zero = true, allow_symbolic = false,
+            symbolically_rm_singular = false, kwargs...
+        )
+        # Update `mm` if possible
+        if mm !== nothing && all_int_vars && SU._iszero(rhs)
+            @assert isempty(mm.nzrows) || eq_diff > last(mm.nzrows)
+            push!(mm.nzrows, eq_diff)
+            push!(mm.row_cols, copy(𝑠neighbors(solvable_graph, eq_diff)))
+            push!(mm.row_vals, coeffs)
+        end
+    end
 
     for i in to_rm
         ts.fullvars[i] in vs || continue
