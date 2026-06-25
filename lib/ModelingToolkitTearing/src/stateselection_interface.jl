@@ -129,7 +129,8 @@ function StateSelection.eq_derivative!(ts::TearingState, ieq::Int; kwargs...)
 
     for i in to_rm
         ts.fullvars[i] in vs || continue
-        a, b, islin = Symbolics.linear_expansion(eqs[eq_diff].rhs, ts.fullvars[i])
+        lex = MTKBase.get_linear_expander_for!(sys, ts.fullvars[i], true)
+        a, b, islin = lex(eqs[eq_diff].rhs)
         @assert islin && SU._iszero(a)
         eqs[eq_diff] = Symbolics.COMMON_ZERO ~ b
     end
