@@ -1177,8 +1177,11 @@ function update_simplified_system!(
         dummy_sub::Dict{SymbolicT, SymbolicT}, var_sccs::Vector{Vector{Int}},
         extra_unknowns::Vector{SymbolicT}, iv::Union{SymbolicT, Nothing},
         D::Union{Differential, Shift, Nothing}; array_hack = true)
-    (; fullvars, structure) = state
+    (; fullvars, structure, sys) = state
     (; solvable_graph, var_to_diff, eq_to_diff, graph) = structure
+
+    sys = MTKBase.remove_unhack_system_transformation(sys)
+
     diff_to_var = invview(var_to_diff)
     # Since we solved the highest order derivative variable in discrete systems,
     # we make a list of the solved variables and avoid including them in the
@@ -1202,7 +1205,6 @@ function update_simplified_system!(
               (var_to_diff[i] !== nothing && !isempty(𝑑neighbors(graph, var_to_diff[i]))))
     end
 
-    sys = state.sys
     obs_sub = dummy_sub
     for eq in neweqs
         MTKBase.isdiffeq(eq) || continue
@@ -1247,7 +1249,10 @@ function update_simplified_system!(
     end
     @set! sys.unknowns = unknowns
 
-    obs = (@invokelatest tearing_hacks(sys, obs, unknowns, neweqs; array = array_hack))::Vector{Equation}
+    if array_hack
+        tf = MTKBase.add_array_observed!(obs, unknowns)
+        sys = MTKBase.with_reversible_transformation(sys, tf)
+    end
 
     @set! sys.eqs = neweqs
     @set! sys.observed = obs
@@ -1337,7 +1342,6 @@ function (alg::DefaultReassembleAlgorithm)(state::TearingState,
     (; simplify, array_hack, inline_linear_sccs, analytical_linear_scc_limit) = alg
     (; var_eq_matching, full_var_eq_matching, var_sccs) = tearing_result
 
-
     extra_eqs_vars = get_extra_eqs_vars(
         state, var_eq_matching, full_var_eq_matching, fully_determined)
     neweqs = collect(equations(state))
@@ -1410,6 +1414,11 @@ function (alg::DefaultReassembleAlgorithm)(state::TearingState,
             extra_unknowns, iv, D; array_hack)
     end
 
+    if inline_linear_sccs
+        # We add this at the end so it is the first reversed transformation. This enables better
+        # caching.
+        sys = MTKBase.with_reversible_transformation(sys, InlineLinsolveTransformation)
+    end
     sys = SU.setmetadata(sys, InlineLinearSystemsMetadata, inline_blocks)
     @set! state.sys = sys
     @set! sys.tearing_state = state
