@@ -91,6 +91,11 @@ mutable struct TearingState <: StateSelection.TransformationState{System}
     or source information is unknown.
     """
     eqs_source::Vector{Vector{Symbol}}
+    """
+    A `SparseMatrixCLIL` identifying equations which are integer-coefficient linear
+    combinations of variables.
+    """
+    mm::Union{Nothing, CLIL.SparseMatrixCLIL{Int, Int}}
 end
 
 function Base.show(io::IO, state::TearingState)
@@ -434,7 +439,7 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
                                 canonical_ranks, false)
     return TearingState(sys, fullvars, structure, Equation[], param_derivative_map,
                         no_deriv_params, original_eqs, Equation[], falses(length(fullvars)),
-                        typeof(sys)[], sources)
+                        typeof(sys)[], sources, nothing)
 end
 
 """
