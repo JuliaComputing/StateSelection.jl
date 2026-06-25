@@ -527,10 +527,11 @@ end
     $TYPEDSIGNATURES
 
 Rank of each variable in `fullvars` under the [`canonical_sort_key`](@ref) order.
-Used as a deterministic tie-break (after priorities) in tearing.
+Used as a deterministic tie-break (after priorities) in tearing. Ranks are multiplied
+by a constant factor to enable inserting new variables in between.
 """
 function build_canonical_ranks(fullvars::Vector{SymbolicT})
-    return invperm(sortperm(map(canonical_sort_key, fullvars)))
+    return invperm(sortperm(map(canonical_sort_key, fullvars))) .* 100
 end
 
 function build_state_priorities(sys::System, fullvars::Vector{SymbolicT}, var_to_diff::StateSelection.DiffGraph)
