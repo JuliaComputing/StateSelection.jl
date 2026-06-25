@@ -5,6 +5,7 @@ function StateSelection.var_derivative!(ts::TearingState, v::Int)
     D = Differential(MTKBase.get_iv(sys))
     push!(ts.fullvars, D(ts.fullvars[v]))
     push!(ts.structure.state_priorities, ts.structure.state_priorities[v])
+    push!(ts.structure.canonical_ranks, ts.structure.canonical_ranks[v] + 1)
     push!(ts.structure.var_types, ts.structure.var_types[v])
     push!(ts.always_present, ts.always_present[v])
     mm = ts.mm
