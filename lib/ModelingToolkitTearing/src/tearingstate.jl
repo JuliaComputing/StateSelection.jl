@@ -1,3 +1,10 @@
+# NOTE: Checklist for adding new fields to `SystemStructure` or `TearingState`
+# - Is it populated in the `TearingState` constructor?
+# - Is it handled in the `copy` method?
+# - Is it updated in `var_derivative!`? (if necessary)
+# - Is it updated in `eq_derivative!`? (if necessary)
+# - Is it updated in `rm_eqs_vars!`? (if necessary)
+
 """
     $TYPEDEF
 
