@@ -258,7 +258,26 @@ function generate_derivative_variables!(
         end
         sccs_to_insert[k] = (i_insert, [dv])
     end
-    sort!(sccs_to_insert, by = first)
+
+    # When multiple entries in `sccs_to_insert` share the same insertion position,
+    # they are inserted in the order they appear in the list. Sort so that lower-order
+    # derivatives (those with more derivatives above them in the chain) come first at
+    # any given position. This ensures `total_sub` is populated in the right order:
+    # D(x) → x_t must be added before the SCC for D(D(x)) is processed.
+    chain_height = let var_to_diff = var_to_diff
+        function __chain_height(dv)
+            h = 0
+            v = dv
+            while true
+                v > length(var_to_diff) && break
+                v = var_to_diff[v]
+                v isa Int || break
+                h += 1
+            end
+            return h
+        end
+    end
+    sort!(sccs_to_insert, by = x -> (first(x), -chain_height(last(x)[1])))
     # remove the idxs we need to remove
     for (i, idxs) in idxs_to_remove
         deleteat!(var_sccs[i], idxs)
