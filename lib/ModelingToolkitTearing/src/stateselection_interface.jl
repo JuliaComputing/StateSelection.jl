@@ -72,8 +72,8 @@ function StateSelection.eq_derivative!(ts::TearingState, ieq::Int; kwargs...)
 
         # Fast path. If we have `mm`, and the equation we're differentiating is present
         # in `mm`, differentation is trivial.
-        idxs = searchsorted(mm.nzrows, ieq)
-        isempty(idxs) || return eq_derivative_mm!(ts, ieq, eq_diff, first(idxs))
+        idx = findfirst(isequal(ieq), mm.nzrows)
+        idx isa Int && return eq_derivative_mm!(ts, ieq, eq_diff, idx)
     end
 
     sys = ts.sys
