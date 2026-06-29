@@ -687,6 +687,10 @@ function sort_fullvars(fullvars::Vector{SymbolicT}, dervaridxs::Vector{Int}, var
         return fullvars, var_types
     end
     iv = iv::SymbolicT
+    # Canonicalize the within-group order by `canonical_sort_key`
+    ckcache = Dict{SymbolicT, Any}() # TODO: Fix Any type
+    ckey(v) = get!(() -> canonical_sort_key(v), ckcache, v)
+    dervaridxs = sort(dervaridxs; by = i -> ckey(fullvars[i]))
     sorted_fullvars = OrderedSet{SymbolicT}(fullvars[dervaridxs])
     var_to_old_var = Dict{SymbolicT, SymbolicT}(zip(fullvars, fullvars))
     for dervaridx in dervaridxs
@@ -696,7 +700,7 @@ function sort_fullvars(fullvars::Vector{SymbolicT}, dervaridxs::Vector{Int}, var
             push!(sorted_fullvars, diffvar)
         end
     end
-    for v in fullvars
+    for v in sort(fullvars; by = ckey)
         if !(v in sorted_fullvars)
             push!(sorted_fullvars, v)
         end
@@ -922,4 +926,3 @@ function shift_discrete_system(ts::TearingState)
     @set! ts.fullvars = fullvars
     return ts
 end
-
