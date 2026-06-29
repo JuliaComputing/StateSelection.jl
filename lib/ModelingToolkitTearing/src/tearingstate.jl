@@ -629,7 +629,7 @@ function canonical_sort_key(v::SymbolicT)
         end
         _ => nothing
     end
-    return (canonical_name(x), idxs, opsig)
+    return (opsig, canonical_name(x), idxs)
 end
 
 """
