@@ -178,6 +178,13 @@ function StateSelection.linear_subsys_adjmat!(state::TearingState; kwargs...)
     return mm
 end
 
+# Structural zero check for symbolic CLIL values: `Base.iszero(::Num)` performs
+# a semantic (expansion-based) zero test that can OOM on large coefficient
+# expressions (e.g. multibody models), while explicit stored zeros produced by
+# duplicate-index summation are always structural `Const(0)`.
+StateSelection.CLIL.cheap_iszero(x::Num) = SU._iszero(Symbolics.unwrap(x))
+StateSelection.CLIL.cheap_iszero(x::SymbolicT) = SU._iszero(x)
+
 function maybe_zeros_descend(ex::SymbolicT)
     @match ex begin
         BSImpl.AddMul(; variant) => return variant === SU.AddMulVariant.MUL
