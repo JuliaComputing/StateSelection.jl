@@ -680,7 +680,7 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
     N = length(b)
     A = collect(A)::Matrix{Num}
 
-    if N <= analytical_linear_scc_limit && _check_allow_symbolic_parameter(
+    if N == 1 || N <= analytical_linear_scc_limit && _check_allow_symbolic_parameter(
             state, A, allow_symbolic, allow_parameter
         )
         lu = try

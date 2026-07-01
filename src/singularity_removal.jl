@@ -264,7 +264,16 @@ function aag_bareiss!(structure, mm_orig::SparseMatrixCLIL{T, Ti}) where {T, Ti}
         end
     end
     solvable_variables = findall(is_linear_variables)
-    var_priorities = has_state_priorities(structure) ? get_state_priorities(structure) : nothing
+    sp = has_state_priorities(structure) ? get_state_priorities(structure) : nothing
+    cr = has_canonical_ranks(structure) ? get_canonical_ranks(structure) : nothing
+    var_priorities = if cr === nothing
+        sp
+    elseif sp === nothing
+        cr
+    else
+        big = maximum(cr; init = 0) + 1
+        Int[sp[i] * big + cr[i] for i in eachindex(sp)]
+    end
 
     bar = do_bareiss!(mm, mm_orig, is_linear_variables, is_highest_diff, var_priorities)
 

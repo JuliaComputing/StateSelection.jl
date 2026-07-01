@@ -208,6 +208,7 @@ function dummy_derivative_graph!(
     diff_to_eq = invview(eq_to_diff)
     diff_to_var = invview(var_to_diff)
     invgraph = invview(graph)
+    cranks = has_canonical_ranks(structure) ? get_canonical_ranks(structure) : nothing
     extended_sp = let state_priority = state_priority, var_to_diff = var_to_diff,
         diff_to_var = diff_to_var
 
@@ -278,7 +279,11 @@ function dummy_derivative_graph!(
             if state_priority !== nothing && isfirst
                 sp = extended_sp.(vars)
                 resize!(var_perm, length(sp))
-                sortperm!(var_perm, sp)
+                if cranks === nothing
+                    sortperm!(var_perm, sp)
+                else
+                    sortperm!(var_perm, collect(zip(sp, @view cranks[vars])))
+                end
                 permute!(vars, var_perm)
                 permute!(sp, var_perm)
                 # keep the Jacobian columns aligned with the permuted variable
