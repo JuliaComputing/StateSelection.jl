@@ -275,9 +275,80 @@ function aag_bareiss!(structure, mm_orig::SparseMatrixCLIL{T, Ti}) where {T, Ti}
         Int[sp[i] * big + cr[i] for i in eachindex(sp)]
     end
 
-    bar = do_bareiss!(mm, mm_orig, is_linear_variables, is_highest_diff, var_priorities)
+    # `do_bareiss!` performs a *global* pivot search over the whole matrix,
+    # which will happily swap rows across block boundaries when the matrix is
+    # block-diagonal (e.g. several independent submodels that share no
+    # variables). Such cross-block swaps don't change correctness, but they
+    # perturb the within-block elimination order relative to what that block
+    # would get if it were factored in isolation, which can synthesize
+    # fill-in-heavy (and, downstream during tearing, near-singular) reduced
+    # rows for blocks that would otherwise reduce cleanly on their own. Since
+    # rows that share no column are mathematically independent linear
+    # subsystems, we instead partition rows into connected components (rows
+    # connected iff they share a column) and Bareiss-eliminate each component
+    # separately; this is exact and immune to cross-component perturbation.
+    nrows = size(mm, 1)
+    parent = collect(1:nrows)
+    col_to_row = Dict{Ti, Int}()
+    for i in 1:nrows
+        for c in mm.row_cols[i]
+            j = get(col_to_row, c, 0)
+            if j == 0
+                col_to_row[c] = i
+            else
+                _uf_union!(parent, i, j)
+            end
+        end
+    end
+    components = Dict{Int, Vector{Int}}()
+    for i in 1:nrows
+        r = _uf_find!(parent, i)
+        push!(get!(() -> Int[], components, r), i)
+    end
 
-    return mm, solvable_variables, bar
+    if length(components) <= 1
+        bar = do_bareiss!(mm, mm_orig, is_linear_variables, is_highest_diff, var_priorities)
+        return mm, solvable_variables, bar
+    end
+
+    # Deterministic component order: since rows were visited in increasing
+    # order above, each component's row list is already sorted, so `first`
+    # gives its smallest row index.
+    comp_rows = sort(collect(values(components)); by = first)
+
+    all_nzrows = Ti[]
+    all_row_cols = Vector{Vector{Ti}}()
+    all_row_vals = Vector{Vector{T}}()
+    tier1_pivots = Int[]
+    tier2_pivots = Int[]
+    tier3_pivots = Int[]
+    rank1 = 0
+    rank2_extra = 0
+    rank3_extra = 0
+    for rows in comp_rows
+        sub = SparseMatrixCLIL{T, Ti}(
+            mm.nparentrows, mm.ncols, mm.nzrows[rows], mm.row_cols[rows], mm.row_vals[rows])
+        (rank1_c, rank2_c, rank3_c, pivots_c) = do_bareiss!(
+            sub, nothing, is_linear_variables, is_highest_diff, var_priorities)
+
+        append!(all_nzrows, sub.nzrows)
+        append!(all_row_cols, sub.row_cols)
+        append!(all_row_vals, sub.row_vals)
+
+        append!(tier1_pivots, @view pivots_c[1:rank1_c])
+        append!(tier2_pivots, @view pivots_c[(rank1_c + 1):rank2_c])
+        append!(tier3_pivots, @view pivots_c[(rank2_c + 1):rank3_c])
+        rank1 += rank1_c
+        rank2_extra += rank2_c - rank1_c
+        rank3_extra += rank3_c - rank2_c
+    end
+    pivots_merged = vcat(tier1_pivots, tier2_pivots, tier3_pivots)
+    rank2 = rank1 + rank2_extra
+    rank3 = rank2 + rank3_extra
+
+    mm = SparseMatrixCLIL{T, Ti}(mm.nparentrows, mm.ncols, all_nzrows, all_row_cols, all_row_vals)
+
+    return mm, solvable_variables, (rank1, rank2, rank3, pivots_merged)
 end
 
 "Column-swap no-op passed to `bareiss!` when using the virtual column-swap strategy."
@@ -435,6 +506,21 @@ struct PivotInfo
     The list of pivots chosen by the Bareiss algorithm.
     """
     pivots::Vector{Int}
+end
+
+function _uf_find!(parent::Vector{Int}, x::Int)
+    while parent[x] != x
+        parent[x] = parent[parent[x]]
+        x = parent[x]
+    end
+    return x
+end
+
+function _uf_union!(parent::Vector{Int}, a::Int, b::Int)
+    ra = _uf_find!(parent, a)
+    rb = _uf_find!(parent, b)
+    ra == rb || (parent[max(ra, rb)] = min(ra, rb))
+    return nothing
 end
 
 function structural_singularity_removal!(
