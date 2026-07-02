@@ -504,6 +504,7 @@ function __get_expression_sort_key!(
                     for t in arg_k
                         push!(result, (t[1], t[2] * v, t[3]))
                     end
+                    length(result) > 100 && break
                 end
             else
                 if coeff isa Real
@@ -522,6 +523,7 @@ function __get_expression_sort_key!(
                     for t in arg_k
                         push!(result, (t[1], t[2] ^ v * cf, t[3] + v))
                     end
+                    length(result) > 100 && break
                 end
             end
             return result
@@ -538,15 +540,20 @@ function __get_expression_sort_key!(
                         v = convert(Float64, val)
                         return map(k -> (k[1], k[2] ^ v, k[3] + v), base_key)
                     else
+                        length(base_key) > 100 && return base_key
                         return vcat(base_key, get_expression_sort_key!(cache, args[2], var2idx, canonical_ranks))
                     end
-                    _ => return vcat(base_key, get_expression_sort_key!(cache, args[2], var2idx, canonical_ranks))
+                    _ => begin
+                        length(base_key) > 100 && return base_key
+                        return vcat(base_key, get_expression_sort_key!(cache, args[2], var2idx, canonical_ranks))
+                    end
                 end
                 return base_key
             end
             result = eltype(EquationSortKeyT)[]
             for arg in args
                 append!(result, get_expression_sort_key!(cache, arg, var2idx, canonical_ranks))
+                length(result) > 100 && break
             end
             return result
         end
