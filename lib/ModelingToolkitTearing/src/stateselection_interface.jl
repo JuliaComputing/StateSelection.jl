@@ -27,6 +27,11 @@ function eq_derivative_mm!(ts::TearingState, ieq::Int, eq_diff::Int, idx::Int)
     map!(Base.Fix1(getindex, s.var_to_diff), rcol, rcol)
     # Add to `mm`
     @assert eq_diff > last(mm.nzrows)
+    if !issorted(rcol)
+        perm = sortperm(rcol)
+        rcol = rcol[perm]
+        rval = rval[perm]
+    end
     push!(mm.nzrows, eq_diff)
     push!(mm.row_cols, rcol)
     push!(mm.row_vals, rval)
