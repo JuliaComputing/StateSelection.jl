@@ -103,6 +103,14 @@ mutable struct TearingState <: StateSelection.TransformationState{System}
     combinations of variables.
     """
     mm::Union{Nothing, CLIL.SparseMatrixCLIL{Int, Int}}
+    """
+    A mapping from `D(x)` (not the `toterm` variant) to its derivative expression for
+    analytically eliminated differential variables. No integrated or differentiated form
+    of `x` should be present in the equations if its derivative specified here. Effectively,
+    `x` along with all its integrated and differentiated forms must be eliminated as observed
+    and put into `additional_observed`.
+    """
+    analytical_derivatives::Dict{SymbolicT, SymbolicT}
 end
 
 function Base.show(io::IO, state::TearingState)
@@ -445,7 +453,7 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
                                 canonical_ranks, false)
     return TearingState(sys, fullvars, structure, Equation[], param_derivative_map,
                         no_deriv_params, original_eqs, Equation[], falses(length(fullvars)),
-                        typeof(sys)[], sources, nothing)
+                        typeof(sys)[], sources, nothing, Dict{SymbolicT, SymbolicT}())
 end
 
 """
