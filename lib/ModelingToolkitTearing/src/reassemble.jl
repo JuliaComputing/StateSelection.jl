@@ -1283,6 +1283,7 @@ function update_simplified_system!(
             intersect!(scc, unknowns_set)
         end
         filter!(!isempty, var_sccs)
+        merge!(dummy_sub, state.analytical_derivatives)
         @set! sys.schedule = MTKBase.Schedule(var_sccs, dummy_sub)
     end
     if MTKBase.has_isscheduled(sys)
