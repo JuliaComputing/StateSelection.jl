@@ -340,3 +340,11 @@ MTKTearing.is_timevarying_operator(::Op3) = true
     ci = MTKTearing.ClockInference(ts)
     @test_throws MTKTearing.ExpectedDiscreteClockPartitionError MTKTearing.infer_clocks!(ci)
 end
+
+@testset "Equation sorting does safe exponentiation" begin
+    # https://github.com/SciML/ModelingToolkit.jl/issues/4708
+    @variables x(t) y(t)
+    @named sys = System([D(x) ~ -x, y ~ (1 - 2x)^0.5], t)
+    # This used to run `(-2) ^ 0.5` which hit a `DomainError`
+    @test_nowarn mtkcompile(sys)
+end

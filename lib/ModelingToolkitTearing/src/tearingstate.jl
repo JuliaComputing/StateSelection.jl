@@ -529,7 +529,7 @@ function __get_expression_sort_key!(
                     end
                     v = convert(Float64, v)
                     for t in arg_k
-                        push!(result, (t[1], t[2] ^ v * cf, t[3] + v))
+                        push!(result, (t[1], abs(t[2]) ^ v * cf, t[3] + v))
                     end
                     length(result) > 100 && break
                 end
@@ -546,7 +546,7 @@ function __get_expression_sort_key!(
                 @match args[2] begin
                     BSImpl.Const(; val) => if val isa Real
                         v = convert(Float64, val)
-                        return map(k -> (k[1], k[2] ^ v, k[3] + v), base_key)
+                        return map(k -> (k[1], abs(k[2]) ^ v, k[3] + v), base_key)
                     else
                         length(base_key) > 100 && return base_key
                         return vcat(base_key, get_expression_sort_key!(cache, args[2], var2idx, canonical_ranks))
