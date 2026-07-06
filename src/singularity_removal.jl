@@ -232,6 +232,36 @@ function find_linear_variables(graph, linear_equations, var_to_diff, irreducible
 end
 
 """
+    $TYPEDEF
+
+Comparator intended for use when sorting the rows of a `SparseMatrixCLIL` before
+running Bareiss.
+"""
+struct MMSortKey{M <: SparseMatrixCLIL}
+    mm::M
+end
+
+function (k::MMSortKey)(i::Integer)
+    (; mm) = k
+    # Sort by sparsity, earlier variable coefficient, smaller coefficient and finally by
+    # equation index.
+    return (length(mm.row_cols[i]), mm.row_cols[i], mm.row_vals[i], mm.nzrows[i])
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Sort the rows of `mm` to obtain reproducible results from Bareiss. Uses `MMSortKey` as
+the metric to sort on. The heuristic depends upon the variable ordering.
+"""
+function sort_mm_rows(mm::SparseMatrixCLIL{T, Ti}) where {T, Ti}
+    rperm = sortperm(eachindex(mm.nzrows); by = MMSortKey(mm))
+    return SparseMatrixCLIL{T, Ti}(
+        mm.nparentrows, mm.ncols, mm.nzrows[rperm], mm.row_cols[rperm], mm.row_vals[rperm]
+    )
+end
+
+"""
     $(TYPEDSIGNATURES)
 
 Return `true` if variable `v` is purely algebraic, i.e. it has no derivative
@@ -307,6 +337,7 @@ function aag_bareiss!(structure, mm_orig::SparseMatrixCLIL{T, Ti}) where {T, Ti}
     end
 
     if length(components) <= 1
+        mm = sort_mm_rows(mm)
         bar = do_bareiss!(mm, mm_orig, is_linear_variables, is_highest_diff, var_priorities)
         return mm, solvable_variables, bar
     end
@@ -326,6 +357,7 @@ function aag_bareiss!(structure, mm_orig::SparseMatrixCLIL{T, Ti}) where {T, Ti}
     rank2_extra = 0
     rank3_extra = 0
     for rows in comp_rows
+        sort!(rows; by = MMSortKey(mm))
         sub = SparseMatrixCLIL{T, Ti}(
             mm.nparentrows, mm.ncols, mm.nzrows[rows], mm.row_cols[rows], mm.row_vals[rows])
         (rank1_c, rank2_c, rank3_c, pivots_c) = do_bareiss!(
