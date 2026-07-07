@@ -31,6 +31,16 @@ $TYPEDFIELDS
     filter do not participate in the maximal matching and subsequent SCC decomposition.
     """
     eqfilter::F3 = (_ -> true)
+    """
+    The integer-linear subsystem matrix (see `get_mm`), or `nothing`. When provided,
+    SCCs consisting entirely of integer-linear equations are matched exactly: a
+    fraction-free Bareiss factorization of the SCC's rows over its own variables
+    replaces the equations with their triangular reduced forms and matches each
+    equation to its pivot — a numerically proven assignment. A rank-deficient
+    factorization means the SCC is genuinely singular as scheduled and falls back
+    to the structural heuristics.
+    """
+    mm::Union{Nothing, SparseMatrixCLIL{Int, Int}} = nothing
 end
 
 """
@@ -75,8 +85,99 @@ function update_full_var_eq_matching!(
     end
 end
 
+"""
+    $TYPEDSIGNATURES
+
+Try to match the SCC given by `active_vars`/`active_eqs` exactly. Applicable when the
+SCC is square and every equation is a row of the integer-linear subsystem `mm` (with
+`mm_row_of` mapping equation index to `mm` row index, and each row in sync with the
+structural graph). Runs a fraction-free Bareiss factorization of those rows with
+pivoting restricted to `active_vars` (preferring variables satisfying `isder`):
+
+- Full rank: the SCC is proven nonsingular. The equations are replaced — in `mm`, the
+  structural graph and the solvable graph — by their reduced, triangular forms, and
+  each is matched to its pivot variable. The triangular structure makes the
+  solved-equation dependency graph acyclic (matching against the *original* row
+  contents could produce cycles, which `reassemble` cannot schedule), and every pivot
+  coefficient is proven nonzero, so downstream elimination can never manufacture an
+  exactly singular system from these rows. The `(equation, columns, coefficients)`
+  triples are appended to `rewrites` so the caller can update the symbolic equations
+  to match.
+- Rank deficient: the SCC's coefficient matrix over its own variables is exactly
+  singular — the block cannot determine its variables no matter the matching. Warn
+  and return `false` so the caller falls back to the structural heuristics.
+
+Returns `true` iff the SCC was matched exactly.
+"""
+function exact_scc_matching!(
+        structure::SystemStructure, mm::SparseMatrixCLIL{T, Ti}, mm_row_of::Dict{Int, Int},
+        var_eq_matching::MatchingT, active_vars::AbstractSet{Int},
+        active_eqs::AbstractSet{Int}, isder::F,
+        rewrites::Vector{Tuple{Int, Vector{Int}, Vector{Int}}}
+    ) where {T, Ti, F}
+    n = length(active_eqs)
+    (n >= 2 && n == length(active_vars)) || return false
+    (; graph, solvable_graph) = structure
+
+    # Every equation must be an integer-linear row whose cached coefficients are
+    # in sync with the structural graph.
+    rowids = Vector{Int}(undef, n)
+    for (j, e) in enumerate(active_eqs)
+        i = get(mm_row_of, e, nothing)
+        i === nothing && return false
+        cols = mm.row_cols[i]
+        nbrs = 𝑠neighbors(graph, e)
+        length(nbrs) == length(cols) || return false
+        sort(nbrs) == cols || return false
+        rowids[j] = i
+    end
+
+    nvars = ndsts(graph)
+    active_mask = falses(nvars)
+    tier1 = falses(nvars)
+    for v in active_vars
+        active_mask[v] = true
+        isder !== nothing && isder(v) && (tier1[v] = true)
+    end
+
+    sub = SparseMatrixCLIL{T, Ti}(
+        mm.nparentrows, mm.ncols,
+        Ti[mm.nzrows[i] for i in rowids],
+        Vector{Ti}[copy(mm.row_cols[i]) for i in rowids],
+        Vector{T}[copy(mm.row_vals[i]) for i in rowids])
+    ctx = RestrictedBareissContext(tier1, active_mask, nothing)
+    update! = RestrictedContextUpdate(ctx, bareiss_update_virtual_colswap_mtk!)
+    bareiss_ops = (noop_colswap, SyncedSwapRows(nothing), update!, bareiss_zero!)
+    bareiss!(sub, bareiss_ops; find_pivot = ctx)
+    rank = length(ctx.pivots)
+
+    if rank < n
+        @warn lazy"An SCC of $n integer-linear equations is exactly singular over its own \
+        variables (rank $rank): the block cannot determine the variables it is scheduled \
+        to solve. Falling back to structural tearing; expect a singular linear system \
+        downstream. Equations: $(sort!(collect(active_eqs)))." maxlog = 10
+        return false
+    end
+
+    haskey(ENV, "EXACT_SCC_DEBUG") &&
+        println("exact SCC match: n=$n eqs=$(sort!(collect(active_eqs)))")
+    for k in 1:n
+        e = sub.nzrows[k]
+        i = mm_row_of[e]
+        mm.row_cols[i] = sub.row_cols[k]
+        mm.row_vals[i] = sub.row_vals[k]
+        set_neighbors!(graph, e, sub.row_cols[k])
+        if solvable_graph isa BipartiteGraph{Int, Nothing}
+            set_neighbors!(solvable_graph, e, sub.row_cols[k])
+        end
+        var_eq_matching[ctx.pivots[k]] = e
+        push!(rewrites, (e, sub.row_cols[k], sub.row_vals[k]))
+    end
+    return true
+end
+
 function (alg::CarpanzanoTearing)(structure::SystemStructure)
-    (; isder, varfilter, eqfilter) = alg
+    (; isder, varfilter, eqfilter, mm) = alg
     (; graph, solvable_graph) = structure
 
     var_eq_matching = maximal_matching(
@@ -94,6 +195,15 @@ function (alg::CarpanzanoTearing)(structure::SystemStructure)
 
     full_var_eq_matching = copy(var_eq_matching)
     var_sccs = find_var_sccs(graph, var_eq_matching)
+
+    # Exact matching of pure integer-linear SCCs is only implemented for
+    # continuous systems.
+    mm_row_of = if mm !== nothing && !is_only_discrete(structure)
+        Dict{Int, Int}(e => i for (i, e) in enumerate(mm.nzrows))
+    else
+        nothing
+    end
+    rewrites = Tuple{Int, Vector{Int}, Vector{Int}}[]
 
     active_vars = OrderedSet{Int}()
     active_eqs = OrderedSet{Int}()
@@ -116,11 +226,17 @@ function (alg::CarpanzanoTearing)(structure::SystemStructure)
             # Tearing will now determine the matching
             var_eq_matching[var] = unassigned
         end
-        carpanzano_tear_scc!(alg, structure, var_eq_matching, active_vars, active_eqs)
+        exact = mm_row_of !== nothing && exact_scc_matching!(
+            structure, mm, mm_row_of, var_eq_matching, active_vars, active_eqs,
+            isder, rewrites)
+        if !exact
+            carpanzano_tear_scc!(alg, structure, var_eq_matching, active_vars, active_eqs)
+        end
         update_full_var_eq_matching!(graph, full_var_eq_matching, var_eq_matching, vars, remaining_eqs; varfilter)
     end
 
-    return TearingResult(var_eq_matching, full_var_eq_matching, var_sccs), (;)
+    extra = (; linear_rewrite = rewrites)
+    return TearingResult(var_eq_matching, full_var_eq_matching, var_sccs), extra
 end
 
 """
