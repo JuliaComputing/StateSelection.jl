@@ -540,6 +540,53 @@ struct PivotInfo
     pivots::Vector{Int}
 end
 
+"""
+    $(TYPEDEF)
+
+Tiered pivot search used for exact Bareiss factorization of pure-integer SCC
+subsets during tearing. Unlike [`BareissContext`](@ref), there is no
+unrestricted final tier: once `tier2` is exhausted the factorization stops.
+This guarantees every chosen pivot column is an eligible (solvable-for) variable.
+"""
+mutable struct RestrictedBareissContext{V1 <: AbstractVector{Bool}, V2 <: AbstractVector{Bool}, P <: Union{Nothing, AbstractVector{Int}}}
+    pivots::Vector{Int}
+    tier1::V1
+    tier2::V2
+    valid_pivot_mask::BitVector
+    var_priorities::P
+    tier1_done::Bool
+end
+
+function RestrictedBareissContext(tier1, tier2, var_priorities = nothing)
+    return RestrictedBareissContext(
+        Int[], tier1, tier2, trues(length(tier1)), var_priorities, false)
+end
+
+function (ctx::RestrictedBareissContext)(M, k::Int)
+    if !ctx.tier1_done
+        r = find_masked_pivot(LazyMaskAnd(ctx.tier1, ctx.valid_pivot_mask), M, k, ctx.var_priorities)
+        if r !== nothing
+            push!(ctx.pivots, r[1][2])
+            return r
+        end
+        ctx.tier1_done = true
+    end
+    r = find_masked_pivot(LazyMaskAnd(ctx.tier2, ctx.valid_pivot_mask), M, k, ctx.var_priorities)
+    r === nothing && return nothing
+    push!(ctx.pivots, r[1][2])
+    return r
+end
+
+struct RestrictedContextUpdate{C <: RestrictedBareissContext, F}
+    context::C
+    inner_update::F
+end
+
+function (bcu::RestrictedContextUpdate)(zero!, M, k, swapto, pivot, last_pivot; kw...)
+    bcu.context.valid_pivot_mask[swapto[2]] = false
+    return bcu.inner_update(zero!, M, k, swapto, pivot, last_pivot; kw...)
+end
+
 function _uf_find!(parent::Vector{Int}, x::Int)
     while parent[x] != x
         parent[x] = parent[parent[x]]

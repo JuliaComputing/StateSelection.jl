@@ -179,7 +179,10 @@ function dummy_derivative_graph!(state::TransformationState, jac = nothing;
     state.structure.solvable_graph === nothing && find_solvables!(state; kwargs...)
     complete!(state.structure)
     var_eq_matching = complete(pantelides!(state; kwargs...))
-    dummy_derivative_graph!(state.structure, var_eq_matching, jac, state_priority, log)
+    # NOTE: `get_mm` must be queried after `pantelides!`, which extends the
+    # linear subsystem matrix with differentiated rows (`eq_derivative!`).
+    dummy_derivative_graph!(
+        state.structure, var_eq_matching, jac, state_priority, log; mm = get_mm(state))
 end
 
 struct DummyDerivativeSummary
@@ -203,7 +206,8 @@ Perform the dummy derivatives algorithm.
 function dummy_derivative_graph!(
         structure::SystemStructure, var_eq_matching, jac = nothing,
         state_priority = nothing, ::Val{log} = Val(false);
-        tearing_alg::TearingAlgorithm = DummyDerivativeTearing(), kwargs...) where {log}
+        tearing_alg::TearingAlgorithm = DummyDerivativeTearing(),
+        mm = nothing, kwargs...) where {log}
     (; eq_to_diff, var_to_diff, graph) = structure
     diff_to_eq = invview(eq_to_diff)
     diff_to_var = invview(var_to_diff)
@@ -370,7 +374,11 @@ function dummy_derivative_graph!(
         @warn "The number of dummy derivatives ($n_dummys) does not match the number of differentiated equations ($n_diff_eqs)."
     end
 
-    tearing_result, extra = tearing_alg(structure, BitSet(dummy_derivatives))
+    tearing_result, extra = if tearing_alg isa DummyDerivativeTearing
+        tearing_alg(structure, BitSet(dummy_derivatives); mm)
+    else
+        tearing_alg(structure, BitSet(dummy_derivatives))
+    end
     extra = (; extra..., ddsummary = DummyDerivativeSummary(var_dummy_scc, var_state_priority))
     return tearing_result, extra
 end
@@ -428,7 +436,8 @@ struct DummyDerivativeTearing{T <: TearingAlgorithm} <: TearingAlgorithm end
 DummyDerivativeTearing() = DummyDerivativeTearing{CarpanzanoTearing}()
 
 function (::DummyDerivativeTearing{T})(
-        structure::SystemStructure, dummy_derivatives::Union{BitSet, Tuple{}} = ()
+        structure::SystemStructure, dummy_derivatives::Union{BitSet, Tuple{}} = ();
+        mm = nothing
     ) where {T}
     (; var_to_diff) = structure
     # We can eliminate variables that are not selected (differential
@@ -441,11 +450,19 @@ function (::DummyDerivativeTearing{T})(
             can_eliminate[v] = true
         end
     end
-    inner_tearing_alg = T(;
-        isder = Base.Fix1(isdiffed, (structure, dummy_derivatives)),
-        varfilter = Base.Fix1(getindex, can_eliminate)
-    )
-    tearing_result, _ = inner_tearing_alg(structure)
+    inner_tearing_alg = if :mm in fieldnames(T)
+        T(;
+            isder = Base.Fix1(isdiffed, (structure, dummy_derivatives)),
+            varfilter = Base.Fix1(getindex, can_eliminate),
+            mm
+        )
+    else
+        T(;
+            isder = Base.Fix1(isdiffed, (structure, dummy_derivatives)),
+            varfilter = Base.Fix1(getindex, can_eliminate)
+        )
+    end
+    tearing_result, inner_extra = inner_tearing_alg(structure)
 
     for v in 𝑑vertices(structure.graph)
         is_present(structure, v) || continue
@@ -454,5 +471,5 @@ function (::DummyDerivativeTearing{T})(
         tearing_result.var_eq_matching[v] = SelectedState()
     end
 
-    return tearing_result, (; can_eliminate)
+    return tearing_result, (; can_eliminate, inner_extra...)
 end

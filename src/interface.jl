@@ -106,6 +106,17 @@ function linear_subsys_adjmat! end
 function eq_derivative! end
 function var_derivative! end
 
+"""
+    get_mm(state::TransformationState)
+
+Return the cached integer-linear subsystem matrix (a `SparseMatrixCLIL` whose
+rows are kept in sync with the structural graph, including through
+`eq_derivative!`), or `nothing` when the state does not maintain one. Used by
+tearing algorithms to make exact (rank-aware) decisions about integer-linear
+equations.
+"""
+get_mm(::TransformationState) = nothing
+
 function eq_derivative_graph!(s::SystemStructure, eq::Int)
     add_vertex!(s.graph, SRC)
     s.solvable_graph === nothing || add_vertex!(s.solvable_graph, SRC)
