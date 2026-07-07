@@ -271,6 +271,7 @@ function default_rm_eqs_vars!(
         vdiff = var_to_diff[v]
         if vdiff isa Int
             vdiff = old_to_new_var[vdiff]
+            vdiff > 0 || continue
         end
         new_var_to_diff[newv] = vdiff
     end

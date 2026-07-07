@@ -253,6 +253,19 @@ end
     @test length(ts.fullvars) == 2
 end
 
+@testset "`rm_eqs_vars!` allows removing variables with an anti-derivative" begin
+    @variables x(t)
+    @named sys = System([D(x) ~ 2x], t)
+    ts = TearingState(sys)
+    xidx = findfirst(isequal(x), ts.fullvars)::Int
+    dxidx = ts.structure.var_to_diff[xidx]::Int
+    eqidx = only(𝑑neighbors(ts.structure.graph, dxidx))::Int
+    StateSelection.rm_eqs_vars!(ts, [eqidx], [dxidx])
+    @test length(equations(ts)) == 0
+    @test length(ts.fullvars) == 1
+    @test ts.structure.var_to_diff[1] === nothing
+end
+
 @testset "Unknowns in underdetermined systems aren't counted twice" begin
     @variables x[1:3]
     @mtkcompile sys = System([x[1] ~ 2x[2]+3x[3], x[2]^3 + x[3]^3 - 9 ~ 0], [x[1], x[2], x[3]], []) fully_determined=false
