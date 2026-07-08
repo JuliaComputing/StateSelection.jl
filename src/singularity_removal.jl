@@ -59,98 +59,78 @@ end
 """
 $(SIGNATURES)
 
-Find the first linear variable such that `𝑠neighbors(adj, i)[j]` is true given
-the `constraint`.
+Find a variable (column) and its coefficient (value) in `M` among equations (rows) in `range`,
+filtering out equations for which `mask` is `false` (`mask` can be `nothing` to avoid masking).
+In case of a tie, `var_priorities` is used to choose a variable with lower priority. In case
+priorities are tied, it will prefer the row with fewer elements.
 """
-@inline function find_first_linear_variable(M::SparseMatrixCLIL,
-        range,
-        mask,
-        constraint, ::Nothing = nothing)
-    eadj = M.row_cols
-    @inbounds for i in range
-        vertices = eadj[i]
-        if constraint(length(vertices))
-            for (j, v) in enumerate(vertices)
-                if (mask === nothing || mask[v])
-                    return (CartesianIndex(i, v), M.row_vals[i][j])
-                end
-            end
-        end
-    end
-    return nothing
-end
-
 @inline function find_first_linear_variable(
         M::SparseMatrixCLIL,
         range,
         mask,
-        constraint, var_priorities::AbstractVector{Int}
+        var_priorities = nothing
     )
     eadj = M.row_cols
+    candidate_i = 0
+    candidate_v = 0
+    candidate_val = 0
+    candidate_nnz = 0
     @inbounds for i in range
         vertices = eadj[i]
-        constraint(length(vertices)) || continue
-        candidate_v = 0
-        candidate_val = 0
+        nnz = length(vertices)
+        if !iszero(candidate_v) && var_priorities === nothing && nnz >= candidate_nnz
+            continue
+        end
         for (j, v) in enumerate(vertices)
             mask === nothing || mask[v] || continue
-            iszero(candidate_v) || var_priorities[v] < var_priorities[candidate_v] || continue
-            candidate_v = v
-            candidate_val = M.row_vals[i][j]
+            # Prefer, in order
+            # 1. Lower priority pivots
+            # 2. Rows with fewer elements
+            if iszero(candidate_v) || var_priorities === nothing && nnz < candidate_nnz ||
+                    var_priorities !== nothing && (
+                    var_priorities[v] < var_priorities[candidate_v] ||
+                        var_priorities[v] == var_priorities[candidate_v] && nnz < candidate_nnz
+                )
+                candidate_i = i
+                candidate_v = v
+                candidate_val = M.row_vals[i][j]
+                candidate_nnz = nnz
+            end
         end
-        iszero(candidate_v) || return CartesianIndex(i, candidate_v), candidate_val
     end
+    iszero(candidate_v) || return CartesianIndex(candidate_i, candidate_v), candidate_val
     return nothing
 end
 
 @inline function find_first_linear_variable(M::AbstractMatrix,
         range,
         mask,
-        constraint, ::Nothing = nothing)
+        var_priorities = nothing)
+    candidate_i = 0
+    candidate_v = 0
+    candidate_val = 0
+    candidate_nnz = 0
     @inbounds for i in range
         row = @view M[i, :]
-        if constraint(count(!iszero, row))
-            for (v, val) in enumerate(row)
-                if mask === nothing || mask[v]
-                    return CartesianIndex(i, v), val
-                end
-            end
+        nnz = count(!izero, row)
+        if !izero(candidate_v) && var_priorities === nothing && nnz >= candidate_nnz
+            continue
         end
-    end
-    return nothing
-end
-
-@inline function find_first_linear_variable(
-        M::AbstractMatrix,
-        range,
-        mask,
-        constraint, var_priorities::AbstractVector{Int}
-    )
-    @inbounds for i in range
-        row = @view M[i, :]
-        constraint(count(!iszero, row)) || continue
-        candidate_v = 0
-        candidate_val = 0
         for (v, val) in enumerate(row)
             mask === nothing || mask[v] || continue
-            if iszero(candidate_v) || var_priorities[v] < var_priorities[candidate_v]
+            if iszero(candidate_v) || (var_priorities === nothing && nnz < candidate_nnz || var_priorities !== nothing && (var_priorities[v] < var_priorities[candidate_v] || var_priorities[v] == var_priorities[candidate_v] && nnz < candidate_nnz))
+                candidate_i = i
                 candidate_v = v
                 candidate_val = val
+                candidate_nnz = nnz
             end
         end
-        iszero(candidate_v) && return nothing
-        return CartesianIndex(i, candidate_v), candidate_val
     end
     return nothing
 end
 
 function find_masked_pivot(variables, M, k, var_priorities)
-    r = find_first_linear_variable(M, k:size(M, 1), variables, isequal(1), var_priorities)
-    r !== nothing && return r
-    r = find_first_linear_variable(M, k:size(M, 1), variables, isequal(2), var_priorities)
-    r !== nothing && return r
-    r = find_first_linear_variable(M, k:size(M, 1), variables, _ -> true, var_priorities)
-    return r
+    return find_first_linear_variable(M, k:size(M, 1), variables, var_priorities)
 end
 
 count_nonzeros(a::AbstractArray) = count(!iszero, a)
