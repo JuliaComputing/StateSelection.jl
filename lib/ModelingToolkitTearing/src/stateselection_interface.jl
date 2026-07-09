@@ -63,6 +63,8 @@ function eq_derivative_mm!(ts::TearingState, ieq::Int, eq_diff::Int, idx::Int)
     return eq_diff
 end
 
+StateSelection.get_mm(ts::TearingState) = ts.mm
+
 function StateSelection.eq_derivative!(ts::TearingState, ieq::Int; kwargs...)
     s = ts.structure
 
