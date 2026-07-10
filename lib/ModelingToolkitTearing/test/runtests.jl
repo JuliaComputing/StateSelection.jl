@@ -361,3 +361,9 @@ end
     # This used to run `(-2) ^ 0.5` which hit a `DomainError`
     @test_nowarn mtkcompile(sys)
 end
+
+@testset "Initialization equations are scalarized in `mtkcompile`" begin
+    @variables x(t)[1:2]
+    @mtkcompile sys = System([D(x) ~ x], t; initialization_eqs = [x.^2 ~ 2ones(2)])
+    @test issetequal(initialization_equations(sys), [x[1]^2 ~ 2, x[2]^2 ~ 2])
+end
