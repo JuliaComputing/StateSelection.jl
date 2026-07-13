@@ -191,6 +191,86 @@ struct DummyDerivativeSummary
 end
 
 """
+    $(TYPEDSIGNATURES)
+
+Merge the SCCs of the Pantelides matching into the blocks on which dummy-derivative
+selection must operate.
+
+The Mattsson–Söderlind dummy-derivative selection problem is posed on the subproblem of
+differentiated equations and their highest-derivative candidate variables. The SCCs of
+the full matching can be strictly finer than the blocks of that subproblem: a
+differentiated equation matched to a candidate in one SCC may be incident to candidate
+variables in other SCCs. A common example is a twice-differentiated connection alias
+`0 ~ D(D(x)) - D(D(y))` matched to `D(D(x))`, with `D(D(y))` belonging to a
+kinematic-loop SCC: `D(D(x))` then sits in a singleton SCC where it is demoted
+unconditionally, and a high `state_priority` on `x` cannot prevent it even though
+demoting `D(D(y))` instead would be structurally valid (see issue #101). Selecting per
+merged block restores the full selection freedom of the subproblem, and the
+priority-sorted greedy selection inside `dummy_derivative_graph!` then maximizes the
+total priority of the kept states.
+
+Returns the merged list of variable blocks; SCCs without coupling are returned
+unchanged (in particular the result is `===` the input when nothing merges).
+"""
+function merge_dummy_derivative_blocks(
+        structure::SystemStructure, var_eq_matching, var_sccs::Vector{Vector{Int}})
+    (; eq_to_diff, var_to_diff, graph) = structure
+    diff_to_eq = invview(eq_to_diff)
+    diff_to_var = invview(var_to_diff)
+
+    # SCC index of every variable that is a dummy-derivative candidate of its SCC,
+    # mirroring the candidate filter in `dummy_derivative_graph!`.
+    scc_of_candidate = zeros(Int, ndsts(graph))
+    for (i, vars) in enumerate(var_sccs), var in vars
+        var_eq_matching[var] isa Int || continue
+        (diff_to_var[var] !== nothing && is_present(structure, var)) || continue
+        scc_of_candidate[var] = i
+    end
+
+    # Union-find over SCC indices, merging along differentiated equations that are
+    # incident to candidate variables outside the SCC they are matched in.
+    parent = collect(1:length(var_sccs))
+    function root(i::Int)
+        while parent[i] != i
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        end
+        i
+    end
+    merged_any = false
+    for (i, vars) in enumerate(var_sccs), var in vars
+        eq = var_eq_matching[var]
+        eq isa Int || continue
+        diff_to_eq[eq] === nothing && continue
+        for var2 in 𝑠neighbors(graph, eq)
+            j = scc_of_candidate[var2]
+            (j == 0 || j == i) && continue
+            ri = root(i)
+            rj = root(j)
+            ri == rj && continue
+            # union by min keeps roots at the first SCC of each block, which
+            # preserves the original SCC order in the output
+            parent[max(ri, rj)] = min(ri, rj)
+            merged_any = true
+        end
+    end
+    merged_any || return var_sccs
+
+    buckets = Dict{Int, Vector{Int}}()
+    order = Int[]
+    for (i, vars) in enumerate(var_sccs)
+        r = root(i)
+        b = get!(buckets, r) do
+            push!(order, r)
+            Int[]
+        end
+        append!(b, vars)
+    end
+    sort!(order)
+    return [buckets[r] for r in order]
+end
+
+"""
     $TYPEDSIGNATURES
 
 Perform the dummy derivatives algorithm.
@@ -232,6 +312,7 @@ function dummy_derivative_graph!(
     end
 
     var_sccs = find_var_sccs(graph, var_eq_matching)
+    var_sccs = merge_dummy_derivative_blocks(structure, var_eq_matching, var_sccs)
     var_perm = Int[]
     var_dummy_scc = Vector{Int}[]
     var_state_priority = Vector{Float64}[]
