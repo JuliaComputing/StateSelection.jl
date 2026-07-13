@@ -367,3 +367,12 @@ end
     @mtkcompile sys = System([D(x) ~ x], t; initialization_eqs = [x.^2 ~ 2ones(2)])
     @test issetequal(initialization_equations(sys), [x[1]^2 ~ 2, x[2]^2 ~ 2])
 end
+
+@testset "`TearingState` does not drop initial conditions for partially present array variables" begin
+    # This tends to happen in initialization systems, especially after `full_equations` init since
+    # only part of the array is in the unknowns of the DAE.
+    @variables x(t)[1:5]
+    @named sys = System([D(x[1]) ~ x[1]], t, [x], []; initial_conditions = [x => ones(5)])
+    ts = TearingState(sys)
+    @test haskey(initial_conditions(ts.sys), x)
+end
