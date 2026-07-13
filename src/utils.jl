@@ -344,7 +344,8 @@ function get_new_mm(
             # entry: a prior cancellation may have `pop!`ed the matching entry.
             if !isempty(final_row_cols) && col == final_row_cols[end]
                 final_row_vals[end] += new_row_val_i[indices[i]]
-                if iszero(final_row_vals[end])
+                # Structural zero check:
+                if CLIL.cheap_iszero(final_row_vals[end])
                     pop!(final_row_cols)
                     pop!(final_row_vals)
                 end
