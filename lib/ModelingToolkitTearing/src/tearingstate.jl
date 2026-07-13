@@ -439,9 +439,21 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
     new_binds = copy(parent(bindings(sys)))
     new_ics = copy(initial_conditions(sys))
     for var in dvs
-        arr, _ = MTKBase.split_indexed_var(var)
-        delete!(new_binds, arr)
-        delete!(new_ics, arr)
+        arr, isidx = MTKBase.split_indexed_var(var)
+        if isidx
+            if haskey(new_binds, arr)
+                MTKBase.write_possibly_indexed_array!(
+                    new_binds, var, MTKBase.COMMON_NOTHING, MTKBase.COMMON_NOTHING
+                )
+            else
+                MTKBase.write_possibly_indexed_array!(
+                    new_ics, var, MTKBase.COMMON_NOTHING, MTKBase.COMMON_NOTHING
+                )
+            end
+        else
+            delete!(new_binds, arr)
+            delete!(new_ics, arr)
+        end
     end
 
     @set! sys.eqs = eqs
