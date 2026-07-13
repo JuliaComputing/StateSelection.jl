@@ -176,6 +176,8 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
             end
         end
     end
+    init_eqs = MTKBase.flatten_equations(initialization_equations(sys))
+    @set! sys.initialization_eqs = init_eqs
     original_eqs = copy(eqs)
     neqs = length(eqs)
     param_derivative_map = Dict{SymbolicT, SymbolicT}()
