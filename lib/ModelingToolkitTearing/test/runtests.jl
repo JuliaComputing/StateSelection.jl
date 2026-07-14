@@ -376,3 +376,34 @@ end
     ts = TearingState(sys)
     @test haskey(initial_conditions(ts.sys), x)
 end
+
+struct EnforcedInputClockOp <: Symbolics.Operator
+    clk
+end
+(o::EnforcedInputClockOp)() = o(0.0)
+(o::EnforcedInputClockOp)(x) = Symbolics.STerm(o, [x]; type = SU.symtype(x), shape = SU.shape(x))
+SU.promote_symtype(::EnforcedInputClockOp, T::SU.TypeT) = T
+SU.promote_shape(::EnforcedInputClockOp, @nospecialize(sh::SU.ShapeT)) = sh
+MTKTearing.input_timedomain(op::EnforcedInputClockOp, _) = MTKTearing.InputTimeDomainElT[op.clk]
+MTKTearing.output_timedomain(::EnforcedInputClockOp, _) = InferredDiscrete(2)
+MTKTearing.is_transparent_operator(::EnforcedInputClockOp) = true
+MTKTearing.is_timevarying_operator(::EnforcedInputClockOp) = true
+ModelingToolkit.validate_operator(::EnforcedInputClockOp, args...; kws...) = nothing
+
+@testset "Clocks with no equations or variables are retained" begin
+    @variables x(t)
+    clk1 = Clock(0.1)
+    clk2 = Clock(0.2)
+    k = ShiftIndex(clk1)
+    @named sys = System([x(k) ~ x(k-1) + EnforcedInputClockOp(clk2)()], t)
+    ts = TearingState(sys)
+    @test any(isequal(EnforcedInputClockOp(clk2)()), ts.fullvars)
+    ci = MTKTearing.ClockInference(ts)
+    MTKTearing.infer_clocks!(ci)
+    @test issetequal(ci.all_clocks, [clk1, clk2])
+    tss, inputs, cid, id2clock = MTKTearing.split_system(ci)
+    @test length(tss) == length(id2clock) == 2
+    @test issetequal(id2clock, [clk1, clk2])
+    idx = findfirst(isequal(clk2), id2clock)
+    @test isempty(tss[idx].fullvars)
+end
