@@ -33,6 +33,9 @@ struct ClockInference{S <: StateSelection.TransformationState}
     generally extensible to any expression for which it is deemed necessary to preserve \
     clock information."""
     expression_clocks::Dict{SymbolicT, TimeDomain}
+    """A list of all clocks encountered during clock inference. Not all clocks may have a \
+    variable or equation, so this prevents loss of information."""
+    all_clocks::Vector{TimeDomain}
 end
 
 function ClockInference(ts::StateSelection.TransformationState)
@@ -85,7 +88,7 @@ function ClockInference(ts::StateSelection.TransformationState)
         add_edge!(inference_graph, (varvert, dvert))
     end
     ClockInference{typeof(ts)}(ts, eq_domain, init_eq_domain, var_domain, inference_graph,
-                               inferred, Dict{SymbolicT, TimeDomain}())
+                               inferred, Dict{SymbolicT, TimeDomain}(), TimeDomain[])
 end
 
 struct NotInferredTimeDomain end
@@ -398,6 +401,7 @@ function infer_clocks!(ci::ClockInference)
 
     (; must_be_discrete) = infer_equation
     clock_partitions = Graphs.connected_components(inference_graph)
+    all_clocks = Set{TimeDomain}()
     for partition in clock_partitions
         clockidxs = findall(Base.Fix2(Moshi.Data.isa_variant, ClockVertex.Clock), partition)
         has_integer_sequence = any(
@@ -405,7 +409,10 @@ function infer_clocks!(ci::ClockInference)
         )
 
         if isempty(clockidxs)
-            has_integer_sequence && continue
+            if has_integer_sequence
+                push!(all_clocks, SciMLBase.ContinuousClock())
+                continue
+            end
             if any(in(must_be_discrete), partition)
                 throw(ExpectedDiscreteClockPartitionError(ts, partition, true))
             end
@@ -429,6 +436,7 @@ function infer_clocks!(ci::ClockInference)
         if clock == SciMLBase.ContinuousClock() && any(in(must_be_discrete), partition)
             throw(ExpectedDiscreteClockPartitionError(ts, partition, false))
         end
+        push!(all_clocks, clock)
         for vert in partition
             Moshi.Match.@match vert begin
                 ClockVertex.Variable(i) => (var_domain[i] = clock)
@@ -442,6 +450,7 @@ function infer_clocks!(ci::ClockInference)
         end
     end
 
+    append!(ci.all_clocks, all_clocks)
     ci = postprocess_clock_inference(ci, ts)
     return ci
 end
@@ -489,17 +498,6 @@ function Base.showerror(io::IO, err::ExpectedDiscreteClockPartitionError)
     end
 end
 
-function resize_or_push!(v, val, idx)
-    n = length(v)
-    if idx > n
-        for _ in (n + 1):idx
-            push!(v, Int[])
-        end
-        resize!(v, idx)
-    end
-    push!(v[idx], val)
-end
-
 function is_time_domain_conversion(v::SymbolicT)
     @match v begin
         BSImpl.Term(; f, args) && if f isa SU.Operator end => begin
@@ -522,36 +520,30 @@ function split_system(ci::ClockInference{S}) where {S}
     fullvars = StateSelection.get_fullvars(ts)
     sys = get_sys(ts)
     graph = ts.structure.graph
-    continuous_id = Ref(0)
-    clock_to_id = Dict{TimeDomain, Int}()
-    id_to_clock = TimeDomain[]
+    id_to_clock = ci.all_clocks
+    clock_to_id = Dict{TimeDomain, Int}(Iterators.map(reverse, enumerate(id_to_clock)))
+    continuous_id = get(clock_to_id, SciMLBase.ContinuousClock(), 0)
+    # cid_counter = number of clocks
+    cid_counter = length(clock_to_id)
     eq_to_cid = Vector{Int}(undef, nsrcs(graph))
     cid_to_eq = Vector{Int}[]
     init_eq_to_cid = Vector{Int}(undef, length(MTKBase.initialization_equations(sys)))
     cid_to_init_eq = Vector{Int}[]
     var_to_cid = Vector{Int}(undef, ndsts(graph))
     cid_to_var = Vector{Int}[]
-    # cid_counter = number of clocks
-    cid_counter = Ref(0)
 
     # populates clock_to_id and id_to_clock
     # checks if there is a continuous_id (for some reason? clock to id does this too)
+    for _ in 1:length(id_to_clock)
+        push!(cid_to_eq, Int[])
+    end
     for (i, d) in enumerate(eq_domain)
-        # We don't use `get!` here because that desperately wants to box things
-        cid = get(clock_to_id, d, 0)
-        if iszero(cid)
-            cid = (cid_counter[] += 1)
-            push!(id_to_clock, d)
-            if d === SciMLBase.ContinuousClock()
-                continuous_id[] = cid
-            end
-            clock_to_id[d] = cid
-        end
+        cid = clock_to_id[d]
         eq_to_cid[i] = cid
-        resize_or_push!(cid_to_eq, i, cid)
+        push!(cid_to_eq[cid], i)
     end
     # NOTE: This assumes that there is at least one equation for each clock
-    for _ in 1:length(cid_to_eq)
+    for _ in 1:length(id_to_clock)
         push!(cid_to_init_eq, Int[])
     end
     for (i, d) in enumerate(init_eq_domain)
@@ -559,14 +551,16 @@ function split_system(ci::ClockInference{S}) where {S}
         init_eq_to_cid[i] = cid
         push!(cid_to_init_eq[cid], i)
     end
-    continuous_id = continuous_id[]
     # for each clock partition what are the input (indexes/vars)
-    input_idxs = map(_ -> Int[], 1:cid_counter[])
-    inputs = map(_ -> SymbolicT[], 1:cid_counter[])
+    input_idxs = map(_ -> Int[], 1:cid_counter)
+    inputs = map(_ -> SymbolicT[], 1:cid_counter)
     # var_domain corresponds to fullvars/all variables in the system
     nvv = length(var_domain)
     # put variables into the right clock partition
     # keep track of inputs to each partition
+    for _ in 1:length(id_to_clock)
+        push!(cid_to_var, Int[])
+    end
     for i in 1:nvv
         d = var_domain[i]
         cid = get(clock_to_id, d, 0)
@@ -577,7 +571,7 @@ function split_system(ci::ClockInference{S}) where {S}
             push!(input_idxs[cid], i)
             push!(inputs[cid], fullvars[i])
         end
-        resize_or_push!(cid_to_var, i, cid)
+        push!(cid_to_var[cid], i)
     end
 
     # breaks the system up into a continuous and 0 or more discrete systems
