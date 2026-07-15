@@ -4,6 +4,7 @@
 # - Is it updated in `var_derivative!`? (if necessary)
 # - Is it updated in `eq_derivative!`? (if necessary)
 # - Is it updated in `rm_eqs_vars!`? (if necessary)
+# - Is it updated in `scalarize_tearing_state_eqs!`? (if necessary)
 
 """
     $TYPEDEF
@@ -145,7 +146,7 @@ function Base.push!(ev::EquationsView, eq)
     push!(ev.ts.extra_eqs, eq)
 end
 
-function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationSourceInformation} = nothing; check::Bool = true, sort_eqs::Bool = true)
+function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationSourceInformation} = nothing; check::Bool = true, sort_eqs::Bool = true, defer_scalarization::Bool = false)
     # flatten system
     if source_info === nothing
         sys = MTKBase.flatten(sys)
@@ -158,24 +159,37 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
     sys = MTKBase.discover_globalscoped(sys)
     MTKBase.check_no_parameter_equations(sys)
     iv = MTKBase.get_iv(sys)
-    sources = Vector{Symbol}[]
+    sources = Vector{Vector{Symbol}}()
     # flatten array equations
-    if source_info === nothing
-        eqs = MTKBase.flatten_equations(equations(sys))
+    if defer_scalarization
+        # Don't scalarize eagerly — defer scalarization to after clock inference (via
+        # scalarize_tearing_state_eqs!) so that only the relevant partition pays the cost.
+        # The graph built here treats each (possibly array-valued) equation as a single node.
+        if source_info !== nothing
+            @assert length(equations(sys)) == length(source_info.eqs_source) """
+            Mismatch between source information provided to `TearingState` and the structure \
+            of the system.
+            """
+            sources = Vector{Vector{Symbol}}(source_info.eqs_source)
+        end
+        eqs = Vector{Equation}(equations(sys))
     else
-        eqs = Equation[]
-        @assert length(equations(sys)) == length(source_info.eqs_source) """
-        Mismatch between source information provided to `TearingState` and the structure \
-        of the system.
-        """
-        for (eq, src) in zip(equations(sys), source_info.eqs_source)
-            scal_eq = MTKBase.flatten_equation(eq)
-            append!(eqs, scal_eq)
-            for _ in scal_eq
-                push!(sources, src)
+        if source_info !== nothing
+            @assert length(equations(sys)) == length(source_info.eqs_source) """
+            Mismatch between source information provided to `TearingState` and the structure \
+            of the system.
+            """
+            # Eager scalarization: expand each equation and replicate its source entry.
+            for (eq, src) in zip(equations(sys), source_info.eqs_source)
+                scal_eq = MTKBase.flatten_equation(eq)
+                for _ in scal_eq
+                    push!(sources, src)
+                end
             end
         end
+        eqs = MTKBase.flatten_equations(equations(sys))
     end
+    any_array_eqs = false
     init_eqs = MTKBase.flatten_equations(initialization_equations(sys))
     @set! sys.initialization_eqs = init_eqs
     original_eqs = copy(eqs)
@@ -206,6 +220,7 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
     auxiliary_vars = OrderedSet{SymbolicT}()
     eqs_to_retain = trues(length(eqs))
     for (i, eq) in enumerate(eqs)
+        any_array_eqs |= SU.is_array_shape(SU.shape(eq.lhs))
         eq, is_statemachine_equation = canonicalize_eq!(param_derivative_map, no_deriv_params, eqs_to_retain, ps, iv, i, eq)
         empty!(varsbuf)
         SU.search_variables!(varsbuf, eq; is_atomic = MTKBase.OperatorIsAtomic{SU.Operator}())
@@ -260,7 +275,7 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
                     throw(ArgumentError("$v is present in the system but $v′ is not an unknown."))
                 end
 
-                addvar!(v, VARIABLE)
+                isempty(SU.shape(v)::SU.ShapeVecT) && addvar!(v, VARIABLE)
                 @match v begin
                     BSImpl.Term(; f, args) && if f isa SU.Operator &&
                             !(f isa Differential)
@@ -391,6 +406,9 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
     original_eqs = original_eqs[eqs_to_retain]
     neqs = length(eqs)
     symbolic_incidence = symbolic_incidence[eqs_to_retain]
+    if !isempty(sources)
+        sources = sources[eqs_to_retain]
+    end
 
     dervaridxs = OrderedSet{Int}()
     add_intermediate_derivatives!(fullvars, dervaridxs, addvar!)
@@ -427,7 +445,9 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
     end
 
     # build incidence graph
-    graph = build_incidence_graph(length(fullvars), symbolic_incidence, var2idx)
+    graph = defer_scalarization && any_array_eqs ?
+        BipartiteGraph(neqs, length(fullvars), Val(false)) :
+        build_incidence_graph(length(fullvars), symbolic_incidence, var2idx)
 
     # Identify unknowns that do not appear in any equations and are thus not present in
     # `fullvars`. The bindings and initial conditions for these variables should be removed.
@@ -673,6 +693,99 @@ function build_canonical_ranks(fullvars::Vector{SymbolicT})
     return invperm(sortperm(map(canonical_sort_key, fullvars))) .* 100
 end
 
+"""
+    $(TYPEDSIGNATURES)
+
+Scalarize the equations in `ts` in-place and rebuild the bipartite graph. This is called
+after clock inference so that only the continuous-time partition pays the scalarization
+cost. Deferral of scalarization is controlled by the `defer_scalarization` keyword to the
+`TearingState` constructor (independent of whether `source_info` is provided). This is a
+no-op if there are no array-shaped equations (in particular, if `defer_scalarization` was
+`false` at construction time, the equations are already scalar and every `flatten_equation`
+call below returns its argument unchanged).
+
+Assumes `ts.extra_eqs` is empty, i.e. this is called before any tearing/elimination pass has
+added extra equations to `ts` — `ts.original_eqs` and `ts.eqs_source` only track the
+equations originally present in `ts.sys`, not `ts.extra_eqs`.
+"""
+function scalarize_tearing_state_eqs!(ts::TearingState)
+    arr_eqs = equations(ts.sys)
+    # Early exit
+    has_arr_eqs = any(eq -> SU.is_array_shape(SU.shape(eq.lhs)), arr_eqs)
+    has_arr_eqs || return ts
+
+    arr_orig_eqs = ts.original_eqs
+    eqs_source = ts.eqs_source
+
+    new_eqs = Equation[]
+    sizehint!(new_eqs, length(arr_eqs))
+    new_orig = Equation[]
+    sizehint!(new_orig, length(arr_orig_eqs))
+    new_sources = Vector{Vector{Symbol}}()
+    sizehint!(new_sources, length(eqs_source))
+
+    for i in eachindex(arr_eqs)
+        scalar_eqs = MTKBase.flatten_equation(arr_eqs[i])
+        scalar_orig_eqs = MTKBase.flatten_equation(arr_orig_eqs[i])
+        append!(new_eqs, scalar_eqs)
+        append!(new_orig, scalar_orig_eqs)
+        if !isempty(eqs_source)
+            for _ in scalar_orig_eqs
+                push!(new_sources, eqs_source[i])
+            end
+        end
+    end
+
+    # We sorted the unscalarized equations, so no need to redo sorting here
+
+    # Rebuild the bipartite incidence graph from the scalar equations. `fullvars` is already
+    # scalar (the constructor scalarizes variables even when equations are deferred).
+    fullvars = ts.fullvars
+    var2idx = Dict{SymbolicT, Int}(Iterators.map(reverse, enumerate(fullvars)))
+    all_vars_set = Set{SymbolicT}(fullvars)
+    for v in fullvars
+        arr, isidx = MTKBase.split_indexed_var(v)
+        isidx || continue
+        push!(all_vars_set, arr)
+    end
+    varsbuf = Set{SymbolicT}()
+    symbolic_incidence = Vector{Vector{SymbolicT}}()
+    sizehint!(symbolic_incidence, length(new_eqs))
+    for eq in new_eqs
+        empty!(varsbuf)
+        Symbolics.get_variables!(varsbuf, eq, all_vars_set)
+        incidence = SymbolicT[]
+        sizehint!(incidence, length(varsbuf))
+        for v in varsbuf
+            sh = SU.shape(v)::SU.ShapeVecT
+            if isempty(sh)
+                push!(incidence, v)
+                continue
+            end
+            for i in SU.stable_eachindex(v)
+                vi = v[i]
+                push!(incidence, vi)
+            end
+        end
+        push!(symbolic_incidence, incidence)
+    end
+
+    graph = build_incidence_graph(length(fullvars), symbolic_incidence, var2idx)
+
+    sys = ts.sys
+    @set! sys.eqs = new_eqs
+    ts.sys = sys
+    ts.original_eqs = new_orig
+    ts.eqs_source = new_sources
+
+    structure = ts.structure
+    @set! structure.graph = complete(graph)
+    @set! structure.eq_to_diff = StateSelection.DiffGraph(nsrcs(structure.graph))
+    ts.structure = structure
+
+    return ts
+end
+
 function build_state_priorities(sys::System, fullvars::Vector{SymbolicT}, var_to_diff::StateSelection.DiffGraph)
     # Cache the state priorities
     sps = state_priorities(sys)
@@ -814,7 +927,12 @@ function canonicalize_eq!(param_derivative_map::Dict{SymbolicT, SymbolicT}, no_d
         end
         BSImpl.Const(;) && if SU._iszero(lhs) end => nothing
         _ => begin
-            eq = Symbolics.COMMON_ZERO ~ (rhs - lhs)
+            # Skip canonicalization for array-shaped lhs — creating `0 ~ rhs - lhs`
+            # would fail with a size mismatch. Array equations are scalarized later by
+            # scalarize_tearing_state_eqs!, which applies canonical form to each scalar piece.
+            if isempty(SU.shape(lhs)::SU.ShapeVecT)
+                eq = Symbolics.COMMON_ZERO ~ (rhs - lhs)
+            end
         end
     end
     return eq, is_statemachine_equation
