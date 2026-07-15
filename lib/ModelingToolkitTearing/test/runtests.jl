@@ -11,6 +11,7 @@ import SymbolicUtils as SU
 using SymbolicUtils: unwrap
 using Setfield
 using ForwardDiff
+import ModelingToolkitBase as MTKBase
 
 @testset "`InferredDiscrete` validation" begin
     k = ShiftIndex()
@@ -406,4 +407,89 @@ ModelingToolkit.validate_operator(::EnforcedInputClockOp, args...; kws...) = not
     @test issetequal(id2clock, [clk1, clk2])
     idx = findfirst(isequal(clk2), id2clock)
     @test isempty(tss[idx].fullvars)
+end
+
+@testset "`TearingState` `defer_scalarization`" begin
+    @testset "deferred construction leaves array equations unscalarized" begin
+        @variables x(t)[1:3] y(t)
+        @named sys = System([D(x) ~ x, y ~ sum(x)], t)
+
+        ts = TearingState(sys; defer_scalarization = true)
+        # The array equation and the equation referencing `x` as a whole are kept as-is,
+        # i.e. not flattened into one equation per array element.
+        @test length(equations(ts)) == 2
+        @test any(eq -> SU.is_array_shape(SU.shape(eq.lhs)), equations(ts))
+        # Since there are array-shaped equations, the incidence graph is left empty
+        # (to be filled in later by `scalarize_tearing_state_eqs!`).
+        @test ts.structure.graph.ne == 0
+        # `fullvars` must still be fully scalarized even though equations are not: there
+        # should be no leftover "whole array" entry (e.g. `D(x)` itself, as opposed to
+        # `D(x[1])`, `D(x[2])`, `D(x[3])`) alongside its scalar components.
+        @test all(v -> isempty(SU.shape(v)), ts.fullvars)
+        @test length(ts.fullvars) == 7 # D(x[1]), D(x[2]), D(x[3]), x[1], x[2], x[3], y
+    end
+
+    @testset "`scalarize_tearing_state_eqs!` matches eager scalarization" begin
+        @variables x(t)[1:3] y(t)
+        @named sys = System([D(x) ~ x, y ~ sum(x)], t)
+
+        ts_eager = TearingState(sys)
+        ts_deferred = TearingState(sys; defer_scalarization = true)
+        MTKTearing.scalarize_tearing_state_eqs!(ts_deferred)
+
+        @test isequal(ts_eager.fullvars, ts_deferred.fullvars)
+        @test collect(equations(ts_eager)) == collect(equations(ts_deferred))
+        @test length(equations(ts_deferred)) == 4
+        neqs = length(equations(ts_deferred))
+        nvars = length(ts_deferred.fullvars)
+        for ieq in 1:neqs, ivar in 1:nvars
+            @test Graphs.has_edge(ts_eager.structure.graph, BipartiteEdge(ieq, ivar)) ==
+                  Graphs.has_edge(ts_deferred.structure.graph, BipartiteEdge(ieq, ivar))
+        end
+    end
+
+    @testset "no array equations: deferral is a no-op" begin
+        @variables a(t) b(t)
+        @named sys = System([D(a) ~ b, b ~ 2a], t)
+
+        ts_eager = TearingState(sys)
+        ts_deferred = TearingState(sys; defer_scalarization = true)
+        # No array-shaped equations, so the graph is built eagerly regardless of
+        # `defer_scalarization`.
+        @test ts_deferred.structure.graph.ne == ts_eager.structure.graph.ne > 0
+
+        graph_before = ts_deferred.structure.graph
+        MTKTearing.scalarize_tearing_state_eqs!(ts_deferred)
+        # A true no-op: the graph is not rebuilt.
+        @test ts_deferred.structure.graph === graph_before
+        @test isequal(ts_eager.fullvars, ts_deferred.fullvars)
+        @test collect(equations(ts_eager)) == collect(equations(ts_deferred))
+    end
+
+    @testset "`scalarize_tearing_state_eqs!` is idempotent" begin
+        @variables x(t)[1:3] y(t)
+        @named sys = System([D(x) ~ x, y ~ sum(x)], t)
+        ts = TearingState(sys; defer_scalarization = true)
+        MTKTearing.scalarize_tearing_state_eqs!(ts)
+        neqs, nvars = length(equations(ts)), length(ts.fullvars)
+        eqs_before = collect(equations(ts))
+        MTKTearing.scalarize_tearing_state_eqs!(ts)
+        @test length(equations(ts)) == neqs
+        @test length(ts.fullvars) == nvars
+        @test collect(equations(ts)) == eqs_before
+    end
+
+    @testset "`eqs_source` is scalarized consistently with equations" begin
+        @variables x(t)[1:3] y(t)
+        @named sys = System([D(x) ~ x, y ~ sum(x)], t)
+        src_info = MTKBase.EquationSourceInformation([[:a], [:b]], falses(2))
+
+        ts_eager = TearingState(sys, src_info)
+        ts_deferred = TearingState(sys, src_info; defer_scalarization = true)
+        @test ts_deferred.eqs_source == [[:a], [:b]] # not yet expanded per scalar equation
+        MTKTearing.scalarize_tearing_state_eqs!(ts_deferred)
+
+        @test ts_eager.eqs_source == ts_deferred.eqs_source
+        @test ts_deferred.eqs_source == [[:a], [:a], [:a], [:b]]
+    end
 end
