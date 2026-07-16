@@ -248,6 +248,14 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
             iv isa SymbolicT && MTKBase.isdelay(v, iv) && continue
 
             if !in(v, dvs)
+                arr, isidx = MTKBase.split_indexed_var(v)
+                # Handles cases list `D(x[1:2])`
+                if isidx && SU.is_array_shape(SU.shape(v)) && SU.shape(v) isa SU.ShapeVecT
+                    for idx in SU.stable_eachindex(v)
+                        push!(auxiliary_vars, v[idx])
+                    end
+                    continue
+                end
                 isvalid = @match v begin
                     BSImpl.Term(; f, args) => f isa Shift || isempty(args) || f isa SU.Operator && is_transparent_operator(f)::Bool
                     _ => false
