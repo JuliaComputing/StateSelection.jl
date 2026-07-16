@@ -249,12 +249,26 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
 
             if !in(v, dvs)
                 arr, isidx = MTKBase.split_indexed_var(v)
-                # Handles cases list `D(x[1:2])`
-                if isidx && SU.is_array_shape(SU.shape(v)) && SU.shape(v) isa SU.ShapeVecT
-                    for idx in SU.stable_eachindex(v)
-                        push!(auxiliary_vars, v[idx])
+                if isidx
+                    # Handles cases list `D(x[1:2])`.
+                    if SU.is_array_shape(SU.shape(v)) && SU.shape(v) isa SU.ShapeVecT
+                        for idx in SU.stable_eachindex(v)
+                            push!(auxiliary_vars, v[idx])
+                        end
+                        continue
                     end
-                    continue
+                    # Handles cases like `x[i]` where `i` is a variable.
+                    if any(!SU.isconst, Iterators.drop(arguments(v), 1)) && SU.shape(arr) isa SU.ShapeVecT
+                        for idx in SU.stable_eachindex(arr)
+                            push!(auxiliary_vars, arr[idx])
+                        end
+                        for arg in Iterators.drop(arguments(v), 1)
+                            SU.search_variables!(
+                                auxiliary_vars, arg; is_atomic = MTKBase.OperatorIsAtomic{SU.Operator}()
+                            )
+                        end
+                        continue
+                    end
                 end
                 isvalid = @match v begin
                     BSImpl.Term(; f, args) => f isa Shift || isempty(args) || f isa SU.Operator && is_transparent_operator(f)::Bool

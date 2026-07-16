@@ -493,3 +493,23 @@ end
         @test ts_deferred.eqs_source == [[:a], [:a], [:a], [:b]]
     end
 end
+
+@testset "`TearingState` ctor for `x[i]` where `i` is a variable" begin
+    N = 3
+    dt = 0.1
+    clock1 = Clock(dt)
+    k = ShiftIndex(clock1)
+
+    @variables u(t) y(t) i(t)::Int
+    @variables x(t)[1:N] = zeros(N)
+
+    eqs = Equation[
+        u ~ sin(t);
+        [x[i + 1](k) ~ u(k - i) for i in 0:(N - 1)];
+        y(k) ~ x(k)[Symbolics.unwrap(i)];
+        i(k) ~ ifelse(i(k - 1) + 1 > N, 1, i(k - 1) + 1)
+    ]
+
+    @named cl = System(eqs, t)
+    @test_nowarn TearingState(cl)
+end
