@@ -773,6 +773,8 @@ function scalarize_tearing_state_eqs!(ts::TearingState)
     graph = build_incidence_graph(length(fullvars), symbolic_incidence, var2idx)
 
     sys = ts.sys
+    init_eqs = MTKBase.flatten_equations(initialization_equations(sys))
+    @set! sys.initialization_eqs = init_eqs
     @set! sys.eqs = new_eqs
     ts.sys = sys
     ts.original_eqs = new_orig
