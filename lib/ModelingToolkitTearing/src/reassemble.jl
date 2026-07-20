@@ -687,7 +687,17 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
     N = length(b)
     A = collect(A)::Matrix{Num}
 
-    if N == 1 || N <= analytical_linear_scc_limit && _check_allow_symbolic_parameter(
+    # If `N == 1`, either this is a large SCC reduced to 1 equation by
+    # `__reduce_linear_system!` or it is a single algebriac equation which contains a
+    # variable coefficient we can't divide by. `length(vars_mask) > 1` checks the former
+    # case - large SCCs reduced to 1 equation can ignore `allow_symbolic`. If the original
+    # SCC has 1 equation, it _must_ respect `allow_symbolic`. Otherwise, for
+    # `1 < N < analytical_linear_scc_limit`, the standard rules apply.
+    if N == 1 && (
+            length(vars_mask) > 1 || _check_allow_symbolic_parameter(
+                state, A, allow_symbolic, allow_parameter
+            )
+        ) || N <= analytical_linear_scc_limit && _check_allow_symbolic_parameter(
             state, A, allow_symbolic, allow_parameter
         )
         lu = try
