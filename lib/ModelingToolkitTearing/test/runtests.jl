@@ -513,3 +513,23 @@ end
     @named cl = System(eqs, t)
     @test_nowarn TearingState(cl)
 end
+
+@testset "`inline_linear_sccs` does not eliminate irreducible variables" begin
+    @variables x(t) y(t)
+    @variables e(t) [irreducible = true]
+    @variables c(t) [irreducible = true] d(t) [irreducible = true]
+    # `d` is marked as algebraic in a singleton SCC with equation `c ~ d`. Inline linear
+    # SCCs would otherwise solve this equation for `d`.
+    @mtkcompile sys = System(
+        [
+            D(x) ~ x,
+            D(c) ~ -c,
+            e ~ x,
+            c ~ d,
+            y ~ c,
+        ], t
+    ) reassemble_alg = MTKTearing.DefaultReassembleAlgorithm(; inline_linear_sccs = true)
+
+    @test Set(unknowns(sys)) == Set([e, c, d])
+end
+

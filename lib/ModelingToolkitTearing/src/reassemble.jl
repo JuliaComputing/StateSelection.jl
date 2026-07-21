@@ -485,7 +485,7 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
         # algebraic variables.
         linsol_result = nothing
         if !is_disc && inline_linear_sccs
-            linsol_result = get_linear_scc_linsol(state, escc, vscc, neweqs, var_eq_matching, total_sub, analytical_linear_scc_limit, simplify)
+            linsol_result = get_linear_scc_linsol(state, escc, vscc, neweqs, var_eq_matching, full_var_eq_matching, total_sub, analytical_linear_scc_limit, simplify)
         end
         if linsol_result isa Tuple{SymbolicT, BitVector, BitVector}
             linsol, eqs_mask, vars_mask = linsol_result
@@ -536,9 +536,7 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
             # can populate `total_sub` appropriately.
             for (i, ieq) in enumerate(escc)
                 eqs_mask[i] && continue
-                # Currently, if an equation is filtered out it is matched to a variable.
-                # This needs to be changed if we update our heuristic.
-                var = eq_var_matching[ieq]::Int
+                var = eq_var_matching[ieq]
                 codegen_equation!(eq_generator, neweqs[ieq], ieq, var; simplify)
             end
         else
@@ -607,6 +605,7 @@ All equations not used in the linear system must be solved as normal.
 function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
                                alg_vars::Vector{Int}, neweqs::Vector{Equation},
                                var_eq_matching::StateSelection.VarEqMatchingT,
+                               full_var_eq_matching::StateSelection.VarEqMatchingT,
                                total_sub::MTKBase.ExpandDerivativeDict{SymbolicT, Dict{SymbolicT, SymbolicT}},
                                analytical_linear_scc_limit::Int,
                                simplify::Bool; allow_symbolic::Bool = false,
@@ -624,9 +623,27 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
     all_torn && return nothing
 
     N = length(alg_eqs)
+    eqs_mask = trues(N)
+    vars_mask = trues(N)
+
+    eq_to_idx = Dict(Iterators.map(reverse, enumerate(alg_eqs)))
+
+    irreds = irreducibles(sys)
+    eq_var_matching = invview(var_eq_matching)
+    for (i, iv) in enumerate(alg_vars)
+        MTKBase.contains_possibly_indexed_element(irreds, fullvars[iv]) || continue
+        # Irreducible variables are excluded
+        vars_mask[i] = false
+        # Along with the equations used for them
+        ieq = full_var_eq_matching[iv]
+        eqs_mask[eq_to_idx[ieq]] = false
+        @assert !(eq_var_matching[ieq] isa Int)
+    end
+
     vars = fullvars[alg_vars]
 
     for i in eachindex(vars)
+        vars_mask[i] || continue
         ivar = alg_vars[i]
         ieq = var_eq_matching[ivar]
         ieq isa Int || continue
@@ -643,6 +660,7 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
     b = fill(Symbolics.COMMON_ZERO, N)
 
     for (eqidx, ieq) in enumerate(alg_eqs)
+        eqs_mask[eqidx] || continue
         eq = neweqs[ieq]
         resid = eq.rhs
         # If `ieq` is a differential equation
@@ -656,8 +674,10 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
     end
 
     for (varidx, var) in enumerate(vars)
+        vars_mask[varidx] || continue
         lex = MTKBase.get_linear_expander_for!(sys, var, true)
         for (eqidx, resid) in enumerate(b)
+            eqs_mask[eqidx] || continue
             Graphs.has_edge(graph, BipartiteEdge(alg_eqs[eqidx], alg_vars[varidx])) || continue
             p, q, islinear = lex(resid)
             islinear || return nothing
@@ -672,10 +692,11 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
 
     # `-` is important! `b` is on the other side of the equality.
     for i in eachindex(b)
+        eqs_mask[i] || continue
         b[i] = -b[i]
     end
 
-    A, b, eqs_mask, vars_mask = __reduce_linear_system!(A, b, var_eq_matching, alg_eqs, alg_vars)
+    A, b = __reduce_linear_system!(A, b, var_eq_matching, alg_eqs, alg_vars, eqs_mask, vars_mask)
 
     N = length(b)
     A = collect(A)::Matrix{Num}
@@ -770,15 +791,13 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
     return (INLINE_LINEAR_SCC_OP(A, b), eqs_mask, vars_mask)
 end
 
-function __reduce_linear_system!(A::StateSelection.CLIL.SparseMatrixCLIL{Num, Int}, b::Vector{SymbolicT}, var_eq_matching::StateSelection.VarEqMatchingT, alg_eqs::Vector{Int}, alg_vars::Vector{Int})
+function __reduce_linear_system!(A::StateSelection.CLIL.SparseMatrixCLIL{Num, Int}, b::Vector{SymbolicT}, var_eq_matching::StateSelection.VarEqMatchingT, alg_eqs::Vector{Int}, alg_vars::Vector{Int}, eqs_mask::BitVector, vars_mask::BitVector)
     N = length(b)
     # Identify rows (equations) not worth involving in the linear solve.
     #
     # The current heuristic is to find all rows with constant coefficients
     # which are matched to a variable in `var_eq_matching`.
-    eqs_mask = trues(N)
-    vars_mask = trues(N)
-    new_N = N
+    new_N = count(eqs_mask)
     eq_var_matching = invview(var_eq_matching)
     var_to_idx = Dict{Int, Int}(Iterators.map(reverse, enumerate(alg_vars)))
     # The `i`th variable in the SCC is eliminated as
@@ -786,6 +805,7 @@ function __reduce_linear_system!(A::StateSelection.CLIL.SparseMatrixCLIL{Num, In
     constants = Dict{Int, SymbolicT}()
     aliases = Dict{Int, SparseArrays.SparseVector{Num, Int}}()
     for (i, coeffs) in enumerate(A.row_vals)
+        eqs_mask[i] || continue
         eq_var_matching[alg_eqs[i]] isa Int || continue
 
         eqs_mask[i] = false
@@ -880,7 +900,7 @@ function __reduce_linear_system!(A::StateSelection.CLIL.SparseMatrixCLIL{Num, In
     old_to_new_eq[.!eqs_mask] .= 0
     A = StateSelection.get_new_mm(aliases, old_to_new_eq, old_to_new_var, A)
 
-    return A, b, eqs_mask, vars_mask
+    return A, b
 end
 
 """
