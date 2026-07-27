@@ -1460,8 +1460,8 @@ function (alg::DefaultReassembleAlgorithm)(state::TearingState,
         sys = MTKBase.with_reversible_transformation(sys, InlineLinsolveTransformation)
     end
     sys = SU.setmetadata(sys, InlineLinearSystemsMetadata, inline_blocks)
-    @set! state.sys = sys
     @set! sys.tearing_state = state
+    state.sys = sys
     return MTKBase.invalidate_cache!(sys)
 end
 
