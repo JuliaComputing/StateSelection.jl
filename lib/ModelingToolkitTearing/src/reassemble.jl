@@ -448,11 +448,12 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
     inline_blocks = InlineLinearSystem[]
 
     # We need to solve extra equations before everything to repsect
-    # topological order.
+    # topological order. Extra equations do not belong to any SCC; tag them with SCC index
+    # `typemax(Int)` so the BLT reordering below suffixes them after all SCCs.
     for eq in extra_eqs
         var = eq_var_matching[eq]
         var isa Int || continue
-        codegen_equation!(eq_generator, neweqs[eq], eq, var; simplify)
+        codegen_equation!(eq_generator, neweqs[eq], eq, var, typemax(Int); simplify)
     end
 
     # if the variable is present in the equations either as-is or differentiated
@@ -468,6 +469,9 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
     # this function, then there is some invalid operation happening on the graph.
     digraph = DiCMOBiGraph{false}(graph, var_eq_matching)
     for (i, scc) in enumerate(var_sccs)
+        # `scc_idx` is the index of the SCC currently being processed; captured here because
+        # inner loops below rebind `i`.
+        scc_idx = i
         # note that the `vscc <-> escc` relation is a set-to-set mapping, and not
         # point-to-point.
         vscc, escc = get_sorted_scc(digraph, full_var_eq_matching, var_eq_matching, scc)
@@ -509,6 +513,7 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
                     push!(eq_generator.neweqs′, eq)
                     push!(eq_generator.eq_ordering, ieq)
                     push!(eq_generator.var_ordering, ∫iv)
+                    push!(eq_generator.eq_scc, scc_idx)
                     for e in copy(𝑑neighbors(graph, iv))
                         e == ieq && continue
                         for v in new_incidence
@@ -537,13 +542,13 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
             for (i, ieq) in enumerate(escc)
                 eqs_mask[i] && continue
                 var = eq_var_matching[ieq]
-                codegen_equation!(eq_generator, neweqs[ieq], ieq, var; simplify)
+                codegen_equation!(eq_generator, neweqs[ieq], ieq, var, scc_idx; simplify)
             end
         else
             for ieq in escc
                 iv = eq_var_matching[ieq]
                 neq = neweqs[ieq]
-                codegen_equation!(eq_generator, neq, ieq, iv; simplify)
+                codegen_equation!(eq_generator, neq, ieq, iv, scc_idx; simplify)
             end
         end
     end
@@ -551,10 +556,10 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
     for eq in extra_eqs
         var = eq_var_matching[eq]
         var isa Int && continue
-        codegen_equation!(eq_generator, neweqs[eq], eq, var; simplify)
+        codegen_equation!(eq_generator, neweqs[eq], eq, var, typemax(Int); simplify)
     end
 
-    (; neweqs′, eq_ordering, var_ordering, solved_eqs, solved_vars) = eq_generator
+    (; neweqs′, eq_ordering, var_ordering, solved_eqs, solved_vars, eq_scc) = eq_generator
 
     is_diff_eq = .!iszero.(var_ordering)
     # Generate new equations and orderings
@@ -564,28 +569,135 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
         error("Tearing internal error: lowering DAE into semi-implicit ODE failed!")
     end
     solved_vars_set = BitSet(solved_vars)
-    # We filled zeros for algebraic variables, so fill them properly here
-    offset = 1
+    # `findnextfn(j)` is true iff `j` is an algebraic unknown (present, not a differential
+    # variable, not solved, not an extra/derivative variable) that needs a slot in
+    # `var_ordering`.
     findnextfn = let diff_vars_set = diff_vars_set, solved_vars_set = solved_vars_set,
         diff_to_var = diff_to_var, ispresent = ispresent
         j -> !(j in diff_vars_set || j in solved_vars_set || j in extra_vars) && diff_to_var[j] === nothing &&
             ispresent(j)
     end
-    for (i, v) in enumerate(var_ordering)
-        v == 0 || continue
-        # find the next variable which is not differential or solved, is not the
-        # derivative of another variable and is present in the equations
-        index = findnext(findnextfn, 1:ndsts(graph), offset)
-        # in case of overdetermined systems, this may not be present
-        index === nothing && break
-        var_ordering[i] = index
-        offset = index + 1
-    end
+    # Permute the generated equations and their solved variables into block-lower-triangular
+    # (SCC) order, using the equation<->variable pairing recorded during code generation
+    # (`var_ordering[k]` is the variable `neweqs′[k]` solves). Equations that do not belong to
+    # any SCC — those generated from `extra_eqs`, tagged with SCC index `typemax(Int)` — are suffixed
+    # after the SCC-ordered block. Extra variables are likewise suffixed by the `setdiff`
+    # append below. Algebraic placeholders left unfilled (e.g. the redundant equations of an
+    # overdetermined system) stay `0` and are dropped by the `filter!`.
+    blt_reorder_generated_equations!(
+        neweqs′, eq_ordering, var_ordering, eq_scc, var_sccs, findnextfn, ndsts(graph))
     filter!(!iszero, var_ordering)
     var_ordering = [var_ordering; setdiff(1:ndsts(graph), var_ordering, solved_vars_set)]
     neweqs = neweqs′
     return neweqs, solved_eqs, eq_ordering, var_ordering, length(solved_vars),
     length(solved_vars_set), inline_blocks
+end
+
+"""
+    $(TYPEDSIGNATURES)
+
+Permute the generated equations (`neweqs′`, with parallel `eq_ordering`) and their solved
+variables (`var_ordering`) into block-lower-triangular (BLT) order — the topological order
+of `var_sccs` — in place.
+
+On entry `eq_scc[k]` is the index (into `var_sccs`) of the SCC that *generated* `neweqs′[k]`
+(recorded during code generation), or `typemax(Int)` for the extra equations of a
+non-fully-determined system, which belong to no SCC. This is used to fill each algebraic
+equation's placeholder (`var_ordering[k] == 0`) with an unknown from its SCC's pool.
+
+The equations are then ordered by a stable sort on `eq_scc`. Before sorting, each non-extra
+`eq_scc[k]` is re-tagged to the SCC that *contains* its solved variable `var_ordering[k]`
+(`scc_pos`): for a differential equation `D(x)=rhs` the generating SCC is the derivative
+variable's singleton, but the block it belongs to is the one holding the state `x`. Extra
+equations keep `typemax(Int)` and hence sort last (suffixed); their algebraic placeholders are
+left unfilled (an overdetermined system's redundant equations have no dedicated unknown; the
+caller drops the resulting `0`s). After the sort each SCC's variables are contiguous in
+`var_ordering`, so `reorder_vars!` renumbers `var_sccs` into contiguous blocks automatically.
+
+`findnextfn(v)` identifies the algebraic unknowns (the variables the placeholder fill assigns);
+`nvars` is `ndsts(graph)`.
+"""
+function blt_reorder_generated_equations!(
+        neweqs′::Vector{Equation}, eq_ordering::Vector{Int}, var_ordering::Vector{Int},
+        eq_scc::Vector{Int}, var_sccs::Vector{Vector{Int}}, findnextfn, nvars::Int)
+    n = length(neweqs′)
+    @assert length(eq_ordering) == n && length(var_ordering) == n && length(eq_scc) == n
+
+    # Position of each variable's SCC in the (topologically sorted) `var_sccs`.
+    scc_pos = zeros(Int, nvars)
+    for (i, scc) in enumerate(var_sccs), v in scc
+        scc_pos[v] = i
+    end
+
+    # Per-SCC pool of algebraic unknowns, to pair with that SCC's algebraic equations.
+    alg_pool = Dict{Int, Vector{Int}}()
+    for (i, scc) in enumerate(var_sccs)
+        pool = [v for v in scc if findnextfn(v)]
+        isempty(pool) || (alg_pool[i] = pool)
+    end
+    counters = Dict{Int, Int}()
+    for k in 1:n
+        var_ordering[k] == 0 || continue
+        i = eq_scc[k]
+        # Extra equations (SCC index `typemax(Int)`) belong to no SCC; leave the placeholder
+        # unfilled (dropped by the caller's `filter!`).
+        i == typemax(Int) && continue
+        pool = get(alg_pool, i, nothing)
+        (pool === nothing) &&
+            error("BLT reordering: SCC $i has an algebraic equation but no algebraic unknown.")
+        c = get(counters, i, 0) + 1
+        c <= length(pool) ||
+            error("BLT reordering: SCC $i has more algebraic equations than unknowns.")
+        counters[i] = c
+        var_ordering[k] = pool[c]
+    end
+
+    # Re-tag each non-extra equation with the SCC containing its solved variable, so the sort
+    # orders by containing SCC (differential equations are generated in a different SCC than
+    # the one holding their state). Extra equations keep `typemax(Int)` and sort last.
+    for k in 1:n
+        eq_scc[k] == typemax(Int) && continue
+        eq_scc[k] = scc_pos[var_ordering[k]]
+    end
+    perm = sortperm(eq_scc)
+    permute!(neweqs′, perm)
+    permute!(eq_ordering, perm)
+    permute!(var_ordering, perm)
+    return nothing
+end
+
+function dump_linear_scc_to_file(fname, A, x)
+    vars = Set{SymbolicT}()
+    SU.search_variables!(vars, A)
+    SU.search_variables!(vars, x)
+    for var in vars
+        push!(vars, MTKBase.split_indexed_var(var)[1])
+    end
+    filter!(v -> !MTKBase.split_indexed_var(v)[2], vars)
+    open(fname, "w") do f
+        for var in vars
+            mac = iscall(var) ? "variables" : "parameters"
+            print(f, "@", mac, " ")
+            print(f, SU.getname(var))
+            iscall(var) && print(f, "(..)")
+            sh = SU.shape(var)::SU.ShapeVecT
+            if isempty(sh)
+                println(f)
+                continue
+            end
+            print(f, "[")
+            for ax in sh
+                print(f, ax, ", ")
+            end
+            print(f, "]")
+            println(f)
+        end
+        println(f)
+        println(f, "A = ", A)
+        println(f)
+        println(f, "x = ", x)
+    end
+    return nothing
 end
 
 const INLINE_LINEAR_SCC_OP = (\)
@@ -990,11 +1102,18 @@ struct EquationGenerator{S}
     `eq_ordering` for `solved_eqs`.
     """
     solved_vars::Vector{Int}
+    """
+    `eq_scc[i]` is the index (into `var_sccs`) of the SCC whose processing generated
+    `neweqs′[i]`. Populated alongside `neweqs′` and used to permute the system into
+    block-lower-triangular (BLT) order; only consumed when there are no extra
+    equations/variables (see `generate_system_equations!`).
+    """
+    eq_scc::Vector{Int}
 end
 
 function EquationGenerator(state, total_sub, D, idep)
     EquationGenerator(
-        state, total_sub, D, idep, Equation[], Int[], Int[], Equation[], Int[])
+        state, total_sub, D, idep, Equation[], Int[], Int[], Equation[], Int[], Int[])
 end
 
 """
@@ -1018,15 +1137,17 @@ is_dervar(eg::EquationGenerator, iv::Int) = StateSelection.isdervar(eg.state.str
     $(TYPEDSIGNATURES)
 
 Appropriately codegen the given equation `eq`, which occurs at index `ieq` in the untorn
-list of equations and is matched to variable at index `iv`.
+list of equations and is matched to variable at index `iv`. `scc_idx` is the index (into
+`var_sccs`) of the SCC being processed; it is recorded in `eg.eq_scc` for any equation
+appended to `neweqs′`, for later BLT ordering.
 """
 function codegen_equation!(eg::EquationGenerator,
-        eq::Equation, ieq::Int, iv::Union{Int, Unassigned}; simplify = false)
+        eq::Equation, ieq::Int, iv::Union{Int, Unassigned}, scc_idx::Int; simplify = false)
     # We generate equations ordered by the matched variables
     #   Solvable equations of differential variables D(x) become differential equations
     #   Solvable equations of non-differential variables become observable equations
     #   Non-solvable equations become algebraic equations.
-    (; state, total_sub, neweqs′, eq_ordering, var_ordering) = eg
+    (; state, total_sub, neweqs′, eq_ordering, var_ordering, eq_scc) = eg
     (; solved_eqs, solved_vars, D, idep) = eg
     (; fullvars, sys, structure) = state
     (; var_to_diff, graph) = structure
@@ -1069,6 +1190,7 @@ function codegen_equation!(eg::EquationGenerator,
         push!(neweqs′, neweq)
         push!(eq_ordering, ieq)
         push!(var_ordering, diff_to_var[iv])
+        push!(eq_scc, scc_idx)
     elseif issolvable
         var = fullvars[iv]
         neweq = make_solved_equation(var, eq, total_sub; simplify)
@@ -1092,6 +1214,7 @@ function codegen_equation!(eg::EquationGenerator,
         push!(eq_ordering, ieq)
         # we push a dummy to `var_ordering` here because `iv` is `unassigned`
         push!(var_ordering, 0)
+        push!(eq_scc, scc_idx)
     end
 end
 
