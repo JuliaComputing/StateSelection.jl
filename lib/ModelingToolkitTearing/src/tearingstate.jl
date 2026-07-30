@@ -227,6 +227,7 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
         incidence = Set{SymbolicT}()
         isalgeq = true
         for v in varsbuf
+            isequal(v, MTKBase.HOMOTOPY_LAMBDA) && continue
             # additionally track brownians in fullvars
             if v in browns
                 addvar!(v, BROWNIAN)

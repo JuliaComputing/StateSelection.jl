@@ -561,3 +561,8 @@ end
     @test Set(unknowns(sys)) == Set([e, c, d])
 end
 
+@testset "`TearingState` ignores `MTK.HOMOTOPY_LAMBDA`" begin
+    @variables x(t)
+    @named sys = System([D(x) ~ x * MTKBase.HOMOTOPY_LAMBDA], t, [x], [])
+    @test_nowarn TearingState(sys)
+end
