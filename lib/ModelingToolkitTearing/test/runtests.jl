@@ -242,6 +242,34 @@ end
     @test !any(eq -> isequal(eq.lhs, y), ts.additional_observed)
 end
 
+@testset "dummy derivative SCC removals are sorted" begin
+    @variables q1(t) q2(t) q3(t) w1(t) w2(t) w3(t)
+    @variables r1(t) r2(t) r3(t) s1(t) s2(t) s3(t)
+    @variables a1(t) a2(t) a3(t) tau1(t) tau2(t) tau3(t)
+    q = [q1, q2, q3]
+    w = [w1, w2, w3]
+    r = [r1, r2, r3]
+    s = [s1, s2, s3]
+    a = [a1, a2, a3]
+    tau = [tau1, tau2, tau3]
+    M = [2.0 0.2 0.1; 0.2 1.5 0.3; 0.1 0.3 1.0]
+    N = 100.0
+    J = 0.01
+
+    eqs = Equation[]
+    append!(eqs, [D(q[i]) ~ w[i] for i in 1:3])
+    append!(eqs, [r[i] ~ N * q[i] for i in 1:3])
+    append!(eqs, [D(r[i]) ~ s[i] for i in 1:3])
+    append!(eqs, [D(s[i]) ~ a[i] for i in 1:3])
+    append!(eqs, [J * a[i] ~ tau[i] for i in 1:3])
+    append!(eqs, [sum(M[i, j] * D(w[j]) for j in 1:3) ~ -(q[i] + N * tau[i]) for i in 1:3])
+
+    perm = [10, 5, 13, 8, 1, 6, 15, 11, 12, 18, 14, 7, 9, 3, 17, 2, 4, 16]
+    @named sys = System(eqs[perm], t)
+    compiled = mtkcompile(sys; sort_eqs = false)
+    @test length(unknowns(compiled)) == length(equations(compiled))
+end
+
 @testset "`rm_eqs_vars!` does not require calling `complete`" begin
     @variables x(t) y(t)
     @named sys = System([D(x) ~ 2x + 1, D(y) ~ 2y + 1], t)

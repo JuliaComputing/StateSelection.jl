@@ -280,6 +280,7 @@ function generate_derivative_variables!(
     sort!(sccs_to_insert, by = x -> (first(x), -chain_height(last(x)[1])))
     # remove the idxs we need to remove
     for (i, idxs) in idxs_to_remove
+        sort!(idxs)
         deleteat!(var_sccs[i], idxs)
     end
     new_sccs = insert_sccs(var_sccs, sccs_to_insert)
