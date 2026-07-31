@@ -12,7 +12,7 @@
     # An arbitrary expression for which we want to preserve clocking information
     Expression(SymbolicT)
     # Compatibility for ModelingToolkit's `DiscreteSystem` semantics.
-    IntegerSequence()
+    struct IntegerSequence end
 end
 
 Moshi.Derive.@derive ClockVertex[Show]
