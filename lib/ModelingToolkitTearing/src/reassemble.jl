@@ -1324,11 +1324,12 @@ function reorder_vars!(state::TearingState, var_eq_matching, var_sccs, eq_orderi
     filter!(!isempty, var_sccs)
 
     # Update system structure
-    @set! state.structure.graph = complete(new_graph)
-    @set! state.structure.solvable_graph = complete(new_solvable_graph)
-    @set! state.structure.var_to_diff = new_var_to_diff
-    @set! state.structure.eq_to_diff = new_eq_to_diff
-    @set! state.fullvars = new_fullvars
+
+    state.structure.graph = complete(new_graph)
+    state.structure.solvable_graph = complete(new_solvable_graph)
+    state.structure.var_to_diff = new_var_to_diff
+    state.structure.eq_to_diff = new_eq_to_diff
+    state.fullvars = new_fullvars
     state
 end
 
