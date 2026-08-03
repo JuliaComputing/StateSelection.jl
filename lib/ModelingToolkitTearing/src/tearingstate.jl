@@ -735,7 +735,7 @@ function scalarize_tearing_state_eqs!(ts::TearingState)
     arr_eqs = equations(ts.sys)
     # Early exit
     has_arr_eqs = any(eq -> SU.is_array_shape(SU.shape(eq.lhs)), arr_eqs)
-    has_arr_eqs || return ts
+    has_arr_eqs || iszero(Graphs.ne(ts.structure.graph)) || return ts
 
     arr_orig_eqs = ts.original_eqs
     eqs_source = ts.eqs_source

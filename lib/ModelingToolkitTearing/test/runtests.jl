@@ -566,3 +566,25 @@ end
     @named sys = System([D(x) ~ x * MTKBase.HOMOTOPY_LAMBDA], t, [x], [])
     @test_nowarn TearingState(sys)
 end
+
+@testset "Deferred scalarization with discrete array equation rebuilds continuous partition incidence graph" begin
+    Ts = 0.1
+    clock = Clock(Ts)
+    k = ShiftIndex(clock)
+    @variables x(t) y(t)[1:2] us(t) tk(t)
+    @parameters tmpl[1:2] = zeros(2) (arrfun::Function)(..)[1:2]
+    eqs = [
+        D(x) ~ -x                       # continuous carrier
+        us(k) ~ Sample(clock)(x)        # sampled input
+        tk(k) ~ tk(k-1) + Ts            # discrete time
+        y ~ arrfun([us], tmpl, tk)      # SINGLE whole-array equation, one call site
+    ]
+    @named sys = System(eqs, t, [x; us; tk; y], [tmpl, arrfun])
+    ts = TearingState(sys; defer_scalarization = true)
+    @test iszero(Graphs.ne(ts.structure.graph))
+    ci = MTKTearing.ClockInference(ts)
+    MTKTearing.infer_clocks!(ci)
+    tss, inputs, cid, id2clock = MTKTearing.split_system(ci)
+    MTKTearing.scalarize_tearing_state_eqs!(tss[cid])
+    @test !iszero(Graphs.ne(tss[cid].structure.graph))
+end
