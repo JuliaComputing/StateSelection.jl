@@ -701,7 +701,34 @@ function dump_linear_scc_to_file(fname, A, x)
     return nothing
 end
 
-const INLINE_LINEAR_SCC_OP = (\)
+function safe_ldiv(A, b)
+    A = unwrap(A)
+    b = unwrap(b)
+    if A isa SymbolicT || A isa AbstractMatrix{Num} || A isa AbstractMatrix{SymbolicT} ||
+            b isa SymbolicT || b isa AbstractVector{Num} || b isa AbstractVector{SymbolicT}
+        return Symbolics.STerm(
+            safe_ldiv, Symbolics.SArgsT((A, b));
+            type = Vector{Real},
+            shape = SU.promote_shape(safe_ldiv, SU.shape(A), SU.shape(b))
+        )
+    end
+    return CommonSolve.solve(LinearProblem(A, b)).u
+end
+
+function SU.promote_symtype(::typeof(safe_ldiv), TA::SU.TypeT, TB::SU.TypeT)
+    return Vector{Real}
+end
+
+function SU.promote_shape(::typeof(safe_ldiv), sha::SU.ShapeT, shb::SU.ShapeT)
+    @nospecialize sha shb
+    if sha isa SU.Unknown
+        return SU.Unknown(1)
+    else
+        return SU.ShapeVecT((sha[2],))
+    end
+end
+
+const INLINE_LINEAR_SCC_OP = safe_ldiv
 
 """
     $TYPEDSIGNATURES
