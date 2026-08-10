@@ -28,7 +28,7 @@ end
     @mtkcompile sys = System([D(x) ~ y, p * y ~ x], t)
     @test issetequal(unknowns(sys), [x])
     @test issetequal(observables(sys), [y])
-    @mtkcompile sys = System([D(x) ~ y, p * y ~ x], t; maybe_zeros = Symbolics.SymbolicT[p])
+    @mtkcompile sys = System([D(x) ~ y, p * y ~ x], t; maybe_zeros = Symbolics.SymbolicT[p]) reassemble_alg = MTKTearing.DefaultReassembleAlgorithm(; inline_linear_sccs = false)
     @test issetequal(unknowns(sys), [x, y])
     @test isempty(observables(sys))
 end
