@@ -913,6 +913,12 @@ function collect_vars_to_set!(buffer::Set{SymbolicT}, vars::Vector{SymbolicT})
             BSImpl.Term(; f, args) && if f === getindex end => push!(buffer, args[1])
             _ => nothing
         end
+        if Symbolics.issymstruct(x) #symstruct case
+            for leaf in collect(Symbolics.SymStruct{SU.symtype(x)}(x))
+                push!(buffer, leaf)
+            end
+            continue
+        end
         sh = SU.shape(x)
         sh isa SU.Unknown && continue
         sh = sh::SU.ShapeVecT
