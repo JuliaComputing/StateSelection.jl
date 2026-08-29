@@ -91,6 +91,18 @@ zero!(a::SparseVector) = (empty!(a.nzind); empty!(a.nzval))
 zero!(a::CLILVector) = zero!(a.vec)
 SparseArrays.dropzeros!(a::CLILVector) = SparseArrays.dropzeros!(a.vec)
 
+"""
+    cheap_iszero(x)
+
+Structural zero check used by [`SparseArrays.dropzeros!`](@ref) on
+`SparseMatrixCLIL`. Defaults to `Base.iszero`. Downstream packages whose CLIL
+value type is symbolic should overload this with a cheap *structural* check:
+`Base.iszero` on e.g. `Symbolics.Num` performs a semantic (expansion-based)
+zero test that can be arbitrarily expensive on large expressions, while
+explicit stored zeros are always structural zeros.
+"""
+cheap_iszero(x) = iszero(x)
+
 # Remove explicitly-stored zeros from each row, in place.
 function SparseArrays.dropzeros!(S::SparseMatrixCLIL)
     for r in eachindex(S.row_vals)
@@ -98,7 +110,7 @@ function SparseArrays.dropzeros!(S::SparseMatrixCLIL)
         vals = S.row_vals[r]
         j = 0
         for k in eachindex(vals)
-            iszero(vals[k]) && continue
+            cheap_iszero(vals[k]) && continue
             j += 1
             cols[j] = cols[k]
             vals[j] = vals[k]
