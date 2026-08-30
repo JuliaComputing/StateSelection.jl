@@ -914,7 +914,7 @@ function collect_vars_to_set!(buffer::Set{SymbolicT}, vars::Vector{SymbolicT})
             _ => nothing
         end
         if Symbolics.issymstruct(x) #symstruct case
-            for leaf in collect(Symbolics.SymStruct{SU.symtype(x)}(x))
+            for leaf in collect(Symbolics.SymStruct{SU.symtype(x)}(x))::Vector{SymbolicT}
                 push!(buffer, leaf)
             end
             continue
