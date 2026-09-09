@@ -55,6 +55,7 @@ function substitute_sample_time(ci::ClockInference{TearingState}, ts::TearingSta
         else
             subrules[st] = dt
             neweq = substitute(eq, subrules)
+            dirty_array_group!(ts, i)
         end
         eqs[i] = neweq
     end
@@ -73,6 +74,20 @@ function system_subset(ts::TearingState, ieqs::Vector{Int}, iieqs::Vector{Int}, 
     if !isempty(ts.eqs_source)
         @set! ts.eqs_source = ts.eqs_source[ieqs]
     end
+    # Array blocks are only tracked once the equations are scalarized (after clock
+    # inference), so the subset only carries scalar rows. Any groups that exist (eagerly
+    # scalarized state) that are split across partitions are broken.
+    array_groups = map(g -> ArrayEquationGroup(g.eq, g.lhs_vars, g.dirty), ts.array_groups)
+    row_group = ts.row_group[ieqs]
+    row_elem = ts.row_elem[ieqs]
+    old_counts = count_group_rows(length(array_groups), ts.row_group)
+    new_counts = count_group_rows(length(array_groups), row_group)
+    for g in eachindex(array_groups)
+        old_counts[g] == new_counts[g] || (array_groups[g].dirty = true)
+    end
+    @set! ts.array_groups = array_groups
+    @set! ts.row_group = row_group
+    @set! ts.row_elem = row_elem
     if all(eq -> eq.rhs isa StateMachineOperator, MTKBase.get_eqs(ts.sys))
         names = Symbol[]
         for eq in MTKBase.get_eqs(ts.sys)

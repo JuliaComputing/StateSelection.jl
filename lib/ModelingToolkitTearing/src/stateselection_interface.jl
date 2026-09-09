@@ -68,6 +68,9 @@ StateSelection.get_mm(ts::TearingState) = ts.mm
 function StateSelection.eq_derivative!(ts::TearingState, ieq::Int; kwargs...)
     s = ts.structure
 
+    # Index reduction differentiating an element of an array equation means the block is
+    # part of a higher-index structure; emit it scalarized.
+    dirty_array_group!(ts, ieq)
     eq_diff = StateSelection.eq_derivative_graph!(s, ieq)
 
     mm = ts.mm
@@ -183,6 +186,56 @@ function StateSelection.linear_subsys_adjmat!(state::TearingState; kwargs...)
         ndsts(graph),
         linear_equations, eadj, cadj)
     return mm
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Split `mm` into the rows that are elements of array equations (see
+[`ArrayEquationGroup`](@ref)) and the rest. Returns `(rest, group_rows)` where `rest` is a
+`SparseMatrixCLIL` over the same parent rows and columns. Used with
+[`merge_array_group_rows`](@ref) to keep array equation rows out of Gaussian elimination
+of the integer-linear subsystem: an element of an array equation must neither be replaced
+by a linear combination of rows nor be used as a pivot to rewrite other rows (which would
+leave the element's derivative matched to a different equation), or the array equation
+can no longer be emitted as a unit. Excluding the rows is conservative: they are simply
+not part of the linear subsystem the elimination works on.
+"""
+function split_array_group_rows(state::TearingState, mm::CLIL.SparseMatrixCLIL{Int, Int})
+    empty = CLIL.SparseMatrixCLIL(mm.nparentrows, mm.ncols, Int[], Vector{Int}[], Vector{Int}[])
+    isempty(state.array_groups) && return mm, empty
+    keep = Int[]
+    split = Int[]
+    for (i, e) in enumerate(mm.nzrows)
+        push!(iszero(row_group(state, e)) ? keep : split, i)
+    end
+    isempty(split) && return mm, empty
+    rest = CLIL.SparseMatrixCLIL(
+        mm.nparentrows, mm.ncols, mm.nzrows[keep], mm.row_cols[keep], mm.row_vals[keep]
+    )
+    group_rows = CLIL.SparseMatrixCLIL(
+        mm.nparentrows, mm.ncols, mm.nzrows[split], mm.row_cols[split], mm.row_vals[split]
+    )
+    return rest, group_rows
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Inverse of [`split_array_group_rows`](@ref): add the rows of `group_rows` back to `mm`,
+keeping `mm.nzrows` sorted.
+"""
+function merge_array_group_rows(
+        mm::CLIL.SparseMatrixCLIL{T, Int}, group_rows::CLIL.SparseMatrixCLIL{Int, Int}
+    ) where {T}
+    isempty(group_rows.nzrows) && return mm
+    nzrows = vcat(mm.nzrows, group_rows.nzrows)
+    row_cols = vcat(mm.row_cols, group_rows.row_cols)
+    row_vals = Vector{T}[mm.row_vals; map(Base.Fix1(convert, Vector{T}), group_rows.row_vals)]
+    perm = sortperm(nzrows)
+    return CLIL.SparseMatrixCLIL(
+        mm.nparentrows, mm.ncols, nzrows[perm], row_cols[perm], row_vals[perm]
+    )
 end
 
 function maybe_zeros_descend(ex::SymbolicT)
@@ -464,6 +517,12 @@ function StateSelection.rm_eqs_vars!(
     if !isempty(state.eqs_source)
         deleteat!(state.eqs_source, eqs_to_rm)
     end
+    # `eqs_to_rm` was sorted and uniqued in place by `default_rm_eqs_vars!`.
+    for ieq in eqs_to_rm
+        dirty_array_group!(state, ieq)
+    end
+    deleteat!(state.row_group, eqs_to_rm)
+    deleteat!(state.row_elem, eqs_to_rm)
 
     @set! sys.eqs = eqs
     state.sys = sys

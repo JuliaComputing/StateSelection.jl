@@ -588,3 +588,121 @@ end
     MTKTearing.scalarize_tearing_state_eqs!(tss[cid])
     @test !iszero(Graphs.ne(tss[cid].structure.graph))
 end
+
+@testset "Array equation groups" begin
+    @testset "`TearingState` tracks array equations as groups of rows" begin
+        @variables x(t)[1:3] y(t)
+        @named sys = System([D(x) ~ -x .+ y, y ~ sum(x)], t)
+        ts = TearingState(sys)
+        # Scalar rows are still what the structure sees.
+        @test length(equations(ts)) == 4
+        @test length(ts.array_groups) == 1
+        grp = only(ts.array_groups)
+        @test !grp.dirty
+        @test isequal(grp.eq.lhs, D(x))
+        @test isequal(grp.lhs_vars, [D(x[1]), D(x[2]), D(x[3])])
+        @test length(ts.row_group) == length(ts.row_elem) == 4
+        rows = findall(==(1), ts.row_group)
+        @test length(rows) == 3
+        @test ts.row_elem[rows] == 1:3
+        @test iszero(ts.row_group[only(setdiff(1:4, rows))])
+        for (k, r) in enumerate(rows)
+            @test isequal(equations(ts)[r].lhs, D(x[k]))
+        end
+    end
+
+    @testset "residual forms are canonicalized" begin
+        @variables u(t)[1:5]
+        lap = u[1:3] .- 2 .* u[2:4] .+ u[3:5]
+        @named sys = System([broadcast(-, D(u[2:4]), lap) ~ zeros(3), u[1] ~ 0, u[5] ~ 0], t, collect(u), [])
+        ts = TearingState(sys)
+        grp = only(ts.array_groups)
+        @test isequal(grp.eq.lhs, D(u[2:4]))
+        @test isequal(grp.eq.rhs, unwrap(lap))
+        @named sys = System([broadcast(+, D(u[2:4]), lap) ~ zeros(3), u[1] ~ 0, u[5] ~ 0], t, collect(u), [])
+        ts = TearingState(sys)
+        grp = only(ts.array_groups)
+        @test isequal(grp.eq.lhs, D(u[2:4]))
+        @test isequal(grp.eq.rhs, unwrap(-lap))
+    end
+
+    @testset "ineligible array equations are not grouped" begin
+        @variables x(t)[1:3] y(t)[1:3]
+        # Algebraic array equation.
+        @named sys = System([D(x) ~ y, zeros(3) ~ x .+ y], t)
+        ts = TearingState(sys)
+        @test length(ts.array_groups) == 1
+        @test isequal(only(ts.array_groups).eq.lhs, D(x))
+        # Derivatives on both sides.
+        @named sys = System([D(x) ~ D(y), D(y) ~ -y], t)
+        ts = TearingState(sys)
+        @test length(ts.array_groups) == 1
+        @test isequal(only(ts.array_groups).eq.lhs, D(y))
+    end
+
+    @testset "differentiating a row dirties its group" begin
+        @variables x(t)[1:3] y(t)
+        @named sys = System([D(x) ~ -x .+ y, y ~ sum(x)], t)
+        ts = TearingState(sys)
+        StateSelection.complete!(ts.structure)
+        r = findfirst(==(1), ts.row_group)
+        for v in BipartiteGraphs.𝑠neighbors(ts.structure.graph, r)
+            ts.structure.var_to_diff[v] === nothing || continue
+            StateSelection.var_derivative!(ts, v)
+        end
+        StateSelection.eq_derivative!(ts, r)
+        @test only(ts.array_groups).dirty
+        # The appended derivative row is scalar.
+        @test length(ts.row_group) == length(ts.row_elem) == length(equations(ts))
+        @test iszero(ts.row_group[end])
+    end
+
+    @testset "alias elimination does not pivot on array equation rows" begin
+        @variables x(t)[1:3] y(t) z(t)
+        # `y ~ sum(x)` is linear in `y` and the elements of `x`; Gaussian elimination of
+        # the linear subsystem must not use `D(x[1]) ~ -x[1] + y` to eliminate `y` from it.
+        @named sys = System([D(x) ~ -x .+ y, y ~ sum(x), 0 ~ z^3 + z - y], t)
+        ts = TearingState(sys)
+        ModelingToolkit.alias_elimination!(ts)
+        @test !only(ts.array_groups).dirty
+        for (r, g) in enumerate(ts.row_group)
+            iszero(g) && continue
+            @test isequal(equations(ts)[r].lhs, D(x[ts.row_elem[r]]))
+        end
+    end
+
+    @testset "`preserve_array_equations` emits intact groups" begin
+        @variables x(t)[1:3] y(t) z(t)
+        @named sys = System([D(x) ~ -x .+ y, y ~ sum(x), 0 ~ z^3 + z - y], t)
+        ssys = mtkcompile(sys; preserve_array_equations = true)
+        eqs = equations(ssys)
+        @test length(eqs) == 2
+        arr = findfirst(eq -> SU.is_array_shape(SU.shape(eq.lhs)), eqs)
+        @test arr !== nothing
+        @test isequal(eqs[arr].lhs, D(x))
+        @test issetequal(unknowns(ssys), [x[1], x[2], x[3], z])
+        ts = ModelingToolkit.get_tearing_state(ssys)
+        @test MTKTearing.row_to_equation_indices(ts) == (arr == 1 ? [1, 1, 1, 2] : [1, 2, 2, 2])
+
+        # Through the algorithm object.
+        alg = MTKTearing.DefaultReassembleAlgorithm(; preserve_array_equations = true)
+        ssys = mtkcompile(sys; reassemble_alg = alg)
+        @test count(eq -> SU.is_array_shape(SU.shape(eq.lhs)), equations(ssys)) == 1
+
+        # Default: scalarized, as before.
+        ssys = mtkcompile(sys)
+        @test length(equations(ssys)) == 4
+        @test !any(eq -> SU.is_array_shape(SU.shape(eq.lhs)), equations(ssys))
+    end
+
+    @testset "dirty groups are emitted scalarized" begin
+        @variables x(t)[1:3] y(t) T(t)
+        # `x[2] ~ y` constrains two differential variables: index reduction differentiates
+        # the constraint and `D(x[2])` is no longer solved from its array equation.
+        @named sys = System([D(x) ~ -x .+ [0, T, 0], 0 ~ x[2] - y, D(y) ~ -y], t)
+        ssys = mtkcompile(sys; preserve_array_equations = true)
+        @test !any(eq -> SU.is_array_shape(SU.shape(eq.lhs)), equations(ssys))
+        ts = ModelingToolkit.get_tearing_state(ssys)
+        @test all(g -> g.dirty, ts.array_groups)
+    end
+end

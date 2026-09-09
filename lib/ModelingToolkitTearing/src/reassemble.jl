@@ -43,6 +43,9 @@ function substitute_derivatives_algevars!(
             for eq in 𝑑neighbors(graph, dv)
                 dummy_sub[dd] = v_t
                 neweqs[eq] = substitute(neweqs[eq], dd => v_t)
+                # The array equation would still contain `D(x)`, which the scalarized row
+                # no longer does.
+                dirty_array_group!(ts, eq)
             end
             fullvars[dv] = v_t
             # If we have:
@@ -56,6 +59,7 @@ function substitute_derivatives_algevars!(
                 dx_t = D(x_t)
                 for eq in 𝑑neighbors(graph, ddx)
                     neweqs[eq] = substitute(neweqs[eq], fullvars[ddx] => dx_t)
+                    dirty_array_group!(ts, eq)
                 end
                 fullvars[ddx] = dx_t
                 dx = ddx
@@ -498,6 +502,10 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
             @assert length(vars_mask) == length(vscc)
             _escc = escc[eqs_mask]
             _vscc = vscc[vars_mask]
+            # Rows solved as part of a linear block are no longer their own array element.
+            for ieq in _escc
+                dirty_array_group!(state, ieq)
+            end
             # `linsol` is the `A \ b` term (runtime path); component `j` is solved
             # for the variable assigned below. The analytical path returns a
             # `Const`-wrapped vector instead, which is not reported.
@@ -585,8 +593,22 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
     # after the SCC-ordered block. Extra variables are likewise suffixed by the `setdiff`
     # append below. Algebraic placeholders left unfilled (e.g. the redundant equations of an
     # overdetermined system) stay `0` and are dropped by the `filter!`.
+    # Array equation membership of each generated equation, so that the rows of an intact
+    # array equation end up contiguous and in element order.
+    eq_group = map(Base.Fix1(row_group, state), eq_ordering)
+    eq_elem = map(eq_ordering) do ieq
+        ieq <= length(state.row_elem) ? state.row_elem[ieq] : 0
+    end
+    for (k, g) in enumerate(eq_group)
+        iszero(g) && continue
+        if state.array_groups[g].dirty
+            eq_group[k] = 0
+            eq_elem[k] = 0
+        end
+    end
     blt_reorder_generated_equations!(
-        neweqs′, eq_ordering, var_ordering, eq_scc, var_sccs, findnextfn, ndsts(graph))
+        neweqs′, eq_ordering, var_ordering, eq_scc, var_sccs, findnextfn, ndsts(graph);
+        eq_group, eq_elem)
     filter!(!iszero, var_ordering)
     var_ordering = [var_ordering; setdiff(1:ndsts(graph), var_ordering, solved_vars_set)]
     neweqs = neweqs′
@@ -617,12 +639,21 @@ caller drops the resulting `0`s). After the sort each SCC's variables are contig
 
 `findnextfn(v)` identifies the algebraic unknowns (the variables the placeholder fill assigns);
 `nvars` is `ndsts(graph)`.
+
+`eq_group[k]`/`eq_elem[k]` identify the array equation (and element within it) that
+`neweqs′[k]` is a row of, or `0`. All rows of an array equation are tagged with the earliest
+SCC among them and sorted by element, so that they are contiguous and in element order.
+Since these rows are all differential equations of selected states, moving them earlier
+does not affect the validity of the BLT order for the algebraic equations.
 """
 function blt_reorder_generated_equations!(
         neweqs′::Vector{Equation}, eq_ordering::Vector{Int}, var_ordering::Vector{Int},
-        eq_scc::Vector{Int}, var_sccs::Vector{Vector{Int}}, findnextfn, nvars::Int)
+        eq_scc::Vector{Int}, var_sccs::Vector{Vector{Int}}, findnextfn, nvars::Int;
+        eq_group::Vector{Int} = zeros(Int, length(neweqs′)),
+        eq_elem::Vector{Int} = zeros(Int, length(neweqs′)))
     n = length(neweqs′)
     @assert length(eq_ordering) == n && length(var_ordering) == n && length(eq_scc) == n
+    @assert length(eq_group) == n && length(eq_elem) == n
 
     # Position of each variable's SCC in the (topologically sorted) `var_sccs`.
     scc_pos = zeros(Int, nvars)
@@ -660,7 +691,24 @@ function blt_reorder_generated_equations!(
         eq_scc[k] == typemax(Int) && continue
         eq_scc[k] = scc_pos[var_ordering[k]]
     end
-    perm = sortperm(eq_scc)
+    if any(!iszero, eq_group)
+        group_scc = Dict{Int, Int}()
+        for k in 1:n
+            g = eq_group[k]
+            iszero(g) && continue
+            group_scc[g] = min(get(group_scc, g, typemax(Int)), eq_scc[k])
+        end
+        for k in 1:n
+            g = eq_group[k]
+            iszero(g) && continue
+            eq_scc[k] = group_scc[g]
+        end
+        perm = sortperm(1:n; by = k -> (eq_scc[k], eq_group[k], eq_elem[k]))
+        permute!(eq_group, perm)
+        permute!(eq_elem, perm)
+    else
+        perm = sortperm(eq_scc)
+    end
     permute!(neweqs′, perm)
     permute!(eq_ordering, perm)
     permute!(var_ordering, perm)
@@ -1190,12 +1238,25 @@ function codegen_equation!(eg::EquationGenerator,
     # the docstring for `add_additional_history!`, this is an exception and needs to be
     # treated like a solved equation rather than a differential equation.
     is_highest_diff = iv isa Int && isdervar && var_to_diff[iv] === nothing
+    group = row_group(state, ieq)
     if issolvable && isdervar && (!isdisc || !is_highest_diff)
         var = fullvars[iv]
         isnothing(D) && throw(UnexpectedDifferentialError(equations(sys)[ieq]))
         order, lv = var_order(iv, diff_to_var)
         dx = D(MTKBase.simplify_shifts(fullvars[lv]))
-        neweq = make_differential_equation(var, dx, eq, total_sub)
+        if iszero(group)
+            neweq, _ = make_differential_equation(var, dx, eq, total_sub)
+        else
+            # The row stays an element of its array equation only if it is solved for its
+            # own first-order derivative and previously solved derivatives do not enter its
+            # RHS (they are not substituted in the array equation).
+            neweq, subbed = make_differential_equation(var, dx, eq, total_sub; check_sub = true)
+            arr_group = state.array_groups[group]
+            if subbed || !isequal(var, dx) ||
+               !isequal(var, arr_group.lhs_vars[state.row_elem[ieq]])
+                arr_group.dirty = true
+            end
+        end
         # We will add `neweq.lhs` to `total_sub`, so any equation involving it won't be
         # incident on it. Remove the edges incident on `iv` from the graph, and add
         # the replacement vertices from `ieq` so that the incidence is still correct.
@@ -1220,6 +1281,7 @@ function codegen_equation!(eg::EquationGenerator,
         push!(var_ordering, diff_to_var[iv])
         push!(eq_scc, scc_idx)
     elseif issolvable
+        iszero(group) || (state.array_groups[group].dirty = true)
         var = fullvars[iv]
         neweq = make_solved_equation(var, eq, total_sub; simplify)
         if neweq !== nothing
@@ -1233,6 +1295,7 @@ function codegen_equation!(eg::EquationGenerator,
             push!(solved_vars, iv)
         end
     else
+        iszero(group) || (state.array_groups[group].dirty = true)
         neweq = make_algebraic_equation(eq, total_sub)
         # For the same reason as solved equations (they are effectively the same)
         if isdisc
@@ -1261,12 +1324,16 @@ end
 Generate a first-order differential equation whose LHS is `dx`.
 
 `var` and `dx` represent the same variable, but `var` may be a higher-order differential and `dx` is always first-order. For example, if `var` is D(D(x)), then `dx` would be `D(x_t)`. Solve `eq` for `var`, substitute previously solved variables, and return the differential equation.
+
+Also return whether substituting previously solved variables changed the solved expression.
+This is only computed (and otherwise `false`) if `check_sub` is `true`.
 """
-function make_differential_equation(var, dx, eq, total_sub)
+function make_differential_equation(var, dx, eq, total_sub; check_sub::Bool = false)
     v1 = Symbolics.symbolic_linear_solve(eq, var)::SymbolicT
     v2 = Symbolics.fixpoint_sub(v1, total_sub, MTKBase.Shift)
     v3 = MTKBase.simplify_shifts(v2)
-    dx ~ v3
+    subbed = check_sub && !isequal(v1, v2)
+    (dx ~ v3), subbed
 end
 
 """
@@ -1357,7 +1424,95 @@ function reorder_vars!(state::TearingState, var_eq_matching, var_sccs, eq_orderi
     state.structure.var_to_diff = new_var_to_diff
     state.structure.eq_to_diff = new_eq_to_diff
     state.fullvars = new_fullvars
+    # Rows of the new graph are the generated equations, in order.
+    state.row_group = map(Base.Fix1(row_group, state), eq_ordering)
+    state.row_elem = map(eq_ordering) do ieq
+        ieq <= length(state.row_elem) ? state.row_elem[ieq] : 0
+    end
     state
+end
+
+"""
+    $(TYPEDSIGNATURES)
+
+Replace runs of generated scalar equations that make up an intact array equation (see
+[`ArrayEquationGroup`](@ref)) by the array equation itself. `state.row_group` and
+`state.row_elem` must describe the rows of `neweqs` (see [`reorder_vars!`](@ref)); on
+return they are updated so that a row is tagged with a group iff it was collapsed into that
+group's array equation, which makes [`row_to_equation_indices`](@ref) well-defined.
+
+A group is collapsed iff it is not dirty, and all of its rows occur consecutively in element
+order with each row being the differential equation of its own element.
+"""
+function collapse_array_equations!(state::TearingState, neweqs::Vector{Equation})
+    (; array_groups, row_group, row_elem) = state
+    n = length(neweqs)
+    @assert length(row_group) == n && length(row_elem) == n
+    any(!iszero, row_group) || return neweqs
+
+    out = Equation[]
+    sizehint!(out, n)
+    new_row_group = zeros(Int, n)
+    new_row_elem = zeros(Int, n)
+    i = 1
+    while i <= n
+        g = row_group[i]
+        if iszero(g) || array_groups[g].dirty
+            push!(out, neweqs[i])
+            i += 1
+            continue
+        end
+        grp = array_groups[g]
+        m = length(grp.lhs_vars)
+        intact = i + m - 1 <= n
+        if intact
+            for k in 1:m
+                r = i + k - 1
+                if row_group[r] != g || row_elem[r] != k ||
+                   !isequal(neweqs[r].lhs, grp.lhs_vars[k])
+                    intact = false
+                    break
+                end
+            end
+        end
+        if !intact
+            grp.dirty = true
+            push!(out, neweqs[i])
+            i += 1
+            continue
+        end
+        push!(out, grp.eq)
+        new_row_group[i:(i + m - 1)] .= g
+        new_row_elem[i:(i + m - 1)] .= 1:m
+        i += m
+    end
+    state.row_group = new_row_group
+    state.row_elem = new_row_elem
+    return out
+end
+
+"""
+    $(TYPEDSIGNATURES)
+
+For each equation row of `state.structure.graph` of a simplified `state`, the index of the
+equation in `equations(state.sys)` it belongs to. This is the identity unless array
+equations were preserved, in which case all rows of an array equation map to it.
+"""
+function row_to_equation_indices(state::TearingState)
+    (; row_group) = state
+    n = length(row_group)
+    idxs = Vector{Int}(undef, n)
+    ieq = 0
+    prev = 0
+    for i in 1:n
+        g = row_group[i]
+        if iszero(g) || g != prev
+            ieq += 1
+        end
+        idxs[i] = ieq
+        prev = g
+    end
+    return idxs
 end
 
 """
@@ -1367,7 +1522,8 @@ function update_simplified_system!(
         state::TearingState, neweqs::Vector{Equation}, solved_eqs::Vector{Equation},
         dummy_sub::Dict{SymbolicT, SymbolicT}, var_sccs::Vector{Vector{Int}},
         extra_unknowns::Vector{SymbolicT}, iv::Union{SymbolicT, Nothing},
-        D::Union{Differential, Shift, Nothing}; array_hack = true)
+        D::Union{Differential, Shift, Nothing}; array_hack = true,
+        preserve_array_equations = false)
     (; fullvars, structure, sys) = state
     (; solvable_graph, var_to_diff, eq_to_diff, graph) = structure
 
@@ -1443,6 +1599,14 @@ function update_simplified_system!(
     if array_hack
         tf = MTKBase.add_array_observed!(obs, unknowns)
         sys = MTKBase.with_reversible_transformation(sys, tf)
+    end
+
+    if preserve_array_equations && !StateSelection.is_only_discrete(structure)
+        neweqs = collapse_array_equations!(state, neweqs)
+    else
+        # No row of the simplified system stands for an array equation.
+        fill!(state.row_group, 0)
+        fill!(state.row_elem, 0)
     end
 
     @set! sys.eqs = neweqs
@@ -1523,6 +1687,16 @@ $TYPEDFIELDS
     equations which is solved symbolically rather than using `LinearSolve.jl`.
     """
     analytical_linear_scc_limit::Int = 2
+    """
+    Whether array differential equations `D(x[slice]) ~ rhs` that survive structural
+    simplification as a block (see [`ArrayEquationGroup`](@ref)) are emitted as single array
+    equations instead of being scalarized. The unknowns of the simplified system remain
+    scalar; the elements of `x[slice]` occupy the unknown slots of the array equation's row
+    range, in element order. Requires code generation to support array equations. Can also
+    be passed as the `preserve_array_equations` keyword argument to the algorithm
+    (and hence to `mtkcompile`).
+    """
+    preserve_array_equations::Bool = false
 end
 
 function (alg::DefaultReassembleAlgorithm)(state::TearingState,
@@ -1530,7 +1704,9 @@ function (alg::DefaultReassembleAlgorithm)(state::TearingState,
                                            mm::Union{CLIL.SparseMatrixCLIL,  Nothing};
                                            fully_determined::Bool = true,
                                            allow_symbolic::Bool = false,
-                                           allow_parameter::Bool = true, kw...)
+                                           allow_parameter::Bool = true,
+                                           preserve_array_equations::Bool = alg.preserve_array_equations,
+                                           kw...)
     (; simplify, array_hack, inline_linear_sccs, analytical_linear_scc_limit) = alg
     (; var_eq_matching, full_var_eq_matching, var_sccs) = tearing_result
 
@@ -1586,7 +1762,7 @@ function (alg::DefaultReassembleAlgorithm)(state::TearingState,
         # var_eq_matching and full_var_eq_matching are now invalidated
 
         sys = update_simplified_system!(state, neweqs, solved_eqs, dummy_sub, var_sccs,
-            extra_unknowns, iv, D; array_hack)
+            extra_unknowns, iv, D; array_hack, preserve_array_equations)
     else
         D = D::Nothing
         neweqs, solved_eqs,
