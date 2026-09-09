@@ -5,6 +5,11 @@
 # - Is it updated in `eq_derivative!`? (if necessary)
 # - Is it updated in `rm_eqs_vars!`? (if necessary)
 # - Is it updated in `scalarize_tearing_state_eqs!`? (if necessary)
+# - Is it updated in `system_subset`? (if necessary)
+#
+# NOTE: Checklist for passes that rewrite equations in a `TearingState`
+# - If the rewrite is anything other than substituting a variable that is retained as an
+#   observed equation (alias/zero elimination), call `dirty_array_group!` for the row.
 
 """
     $TYPEDEF
@@ -48,6 +53,39 @@ function Base.copy(structure::SystemStructure)
 end
 
 StateSelection.is_only_discrete(s::SystemStructure) = s.only_discrete
+
+"""
+    $TYPEDEF
+
+An array-valued differential equation `D(x[slice]) ~ rhs` that is tracked as a unit through
+structural simplification. Its scalarized elements are ordinary rows of the bipartite graph
+(so matching, Pantelides, dummy derivatives, tearing and alias elimination see exact
+per-element incidence), but the rows remember which array equation they came from. If no
+pass needs to break the block — no row is differentiated or removed, no row is rewritten by
+anything other than an alias/zero substitution whose eliminated variable is retained as an
+observed equation, and every row ends up as the differential equation of its own element —
+the array equation is emitted intact by [`update_simplified_system!`](@ref) instead of as
+`length(slice)` scalar equations.
+
+# Fields
+
+$TYPEDFIELDS
+"""
+mutable struct ArrayEquationGroup
+    """The array equation in canonical form: `lhs` is `D(x[slice])`."""
+    eq::Equation
+    """The scalar derivatives `D(x[k])`, in the order in which the rows were scalarized."""
+    lhs_vars::Vector{SymbolicT}
+    """
+    Whether a transformation broke the block, in which case the rows are emitted as scalar
+    equations.
+    """
+    dirty::Bool
+end
+
+function ArrayEquationGroup(eq::Equation, lhs_vars::Vector{SymbolicT})
+    return ArrayEquationGroup(eq, lhs_vars, false)
+end
 
 """
     $TYPEDEF
@@ -112,10 +150,100 @@ mutable struct TearingState <: StateSelection.TransformationState{System}
     and put into `additional_observed`.
     """
     analytical_derivatives::Dict{SymbolicT, SymbolicT}
+    """
+    Array equations tracked as blocks of scalar rows. See [`ArrayEquationGroup`](@ref).
+    """
+    array_groups::Vector{ArrayEquationGroup}
+    """
+    For each equation row of `structure.graph`, the index into `array_groups` of the array
+    equation the row was scalarized from, or `0` for scalar equations. Rows appended after
+    construction (e.g. by `eq_derivative!`) are always scalar.
+    """
+    row_group::Vector{Int}
+    """
+    For each equation row, the (linear) element index of the row within its array equation.
+    `0` for scalar equations.
+    """
+    row_elem::Vector{Int}
+end
+
+function TearingState(
+        sys::System, fullvars::Vector{SymbolicT}, structure::SystemStructure,
+        extra_eqs::Vector{Equation}, param_derivative_map::Dict{SymbolicT, SymbolicT},
+        no_deriv_params::Set{SymbolicT}, original_eqs::Vector{Equation},
+        additional_observed::Vector{Equation}, always_present::BitVector,
+        statemachines::Vector{System}, eqs_source::Vector{Vector{Symbol}},
+        mm::Union{Nothing, CLIL.SparseMatrixCLIL{Int, Int}},
+        analytical_derivatives::Dict{SymbolicT, SymbolicT}
+    )
+    neqs = nsrcs(structure.graph)
+    return TearingState(
+        sys, fullvars, structure, extra_eqs, param_derivative_map, no_deriv_params,
+        original_eqs, additional_observed, always_present, statemachines, eqs_source, mm,
+        analytical_derivatives, ArrayEquationGroup[], zeros(Int, neqs), zeros(Int, neqs)
+    )
 end
 
 function Base.show(io::IO, state::TearingState)
     print(io, "TearingState of ", typeof(state.sys))
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Index into `ts.array_groups` of the array equation that equation row `ieq` belongs to, or
+`0` if it is a scalar equation (including rows appended after construction).
+"""
+function row_group(ts::TearingState, ieq::Int)
+    rg = ts.row_group
+    return ieq <= length(rg) ? rg[ieq] : 0
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Whether row `ieq` is an element of an array equation that has not been marked dirty.
+"""
+function is_intact_array_group_row(ts::TearingState, ieq::Int)
+    g = row_group(ts, ieq)
+    return !iszero(g) && !ts.array_groups[g].dirty
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Mark the array equation that row `ieq` belongs to (if any) as broken, so that its rows are
+emitted as scalar equations.
+"""
+function dirty_array_group!(ts::TearingState, ieq::Int)
+    g = row_group(ts, ieq)
+    iszero(g) && return false
+    ts.array_groups[g].dirty = true
+    return true
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Number of rows tagged with each of the `ngroups` array groups in `row_group`.
+"""
+function count_group_rows(ngroups::Int, row_group::Vector{Int})
+    counts = zeros(Int, ngroups)
+    for g in row_group
+        iszero(g) || (counts[g] += 1)
+    end
+    return counts
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Append `n` scalar rows to the row-to-group bookkeeping of `ts`.
+"""
+function push_scalar_rows!(ts::TearingState, n::Int = 1)
+    append!(ts.row_group, Iterators.repeated(0, n))
+    append!(ts.row_elem, Iterators.repeated(0, n))
+    return ts
 end
 
 StateSelection.has_equations(::TearingState) = true
@@ -144,6 +272,8 @@ function Base.setindex!(ev::EquationsView, v::Equation, i::Integer)
 end
 function Base.push!(ev::EquationsView, eq)
     push!(ev.ts.extra_eqs, eq)
+    push_scalar_rows!(ev.ts)
+    return ev
 end
 
 function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationSourceInformation} = nothing; check::Bool = true, sort_eqs::Bool = true, defer_scalarization::Bool = false)
@@ -160,6 +290,9 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
     MTKBase.check_no_parameter_equations(sys)
     iv = MTKBase.get_iv(sys)
     sources = Vector{Vector{Symbol}}()
+    array_groups = ArrayEquationGroup[]
+    row_group = Int[]
+    row_elem = Int[]
     # flatten array equations
     if defer_scalarization
         # Don't scalarize eagerly — defer scalarization to after clock inference (via
@@ -173,21 +306,28 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
             sources = Vector{Vector{Symbol}}(source_info.eqs_source)
         end
         eqs = Vector{Equation}(equations(sys))
+        resize!(row_group, length(eqs))
+        fill!(row_group, 0)
+        resize!(row_elem, length(eqs))
+        fill!(row_elem, 0)
     else
         if source_info !== nothing
             @assert length(equations(sys)) == length(source_info.eqs_source) """
             Mismatch between source information provided to `TearingState` and the structure \
             of the system.
             """
-            # Eager scalarization: expand each equation and replicate its source entry.
-            for (eq, src) in zip(equations(sys), source_info.eqs_source)
-                scal_eq = MTKBase.flatten_equation(eq)
-                for _ in scal_eq
-                    push!(sources, src)
+        end
+        # Eager scalarization: expand each equation (tracking array equations that can stay
+        # atomic) and replicate its source entry.
+        eqs = Equation[]
+        for (i, eq) in enumerate(equations(sys))
+            nrows = append_equation_rows!(eqs, row_group, row_elem, array_groups, eq, iv)
+            if source_info !== nothing
+                for _ in 1:nrows
+                    push!(sources, source_info.eqs_source[i])
                 end
             end
         end
-        eqs = MTKBase.flatten_equations(equations(sys))
         init_eqs = MTKBase.flatten_equations(initialization_equations(sys))
         @set! sys.initialization_eqs = init_eqs
     end
@@ -425,8 +565,18 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
     end
     filter!(Base.Fix2(!==, MTKBase.COMMON_NOTHING) ∘ last, param_derivative_map)
 
+    if !all(eqs_to_retain)
+        # Removing a row of an array equation (a parameter derivative equation can't be one,
+        # but be safe) breaks the block.
+        for i in findall(!, eqs_to_retain)
+            g = row_group[i]
+            iszero(g) || (array_groups[g].dirty = true)
+        end
+    end
     eqs = eqs[eqs_to_retain]
     original_eqs = original_eqs[eqs_to_retain]
+    row_group = row_group[eqs_to_retain]
+    row_elem = row_elem[eqs_to_retain]
     neqs = length(eqs)
     symbolic_incidence = symbolic_incidence[eqs_to_retain]
     if !isempty(sources)
@@ -462,6 +612,8 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
         eqs = eqs[sortidxs]
         original_eqs = original_eqs[sortidxs]
         symbolic_incidence = symbolic_incidence[sortidxs]
+        row_group = row_group[sortidxs]
+        row_elem = row_elem[sortidxs]
         if !isempty(sources)
             sources = sources[sortidxs]
         end
@@ -510,7 +662,147 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
                                 canonical_ranks, false)
     return TearingState(sys, fullvars, structure, Equation[], param_derivative_map,
                         no_deriv_params, original_eqs, Equation[], falses(length(fullvars)),
-                        typeof(sys)[], sources, nothing, Dict{SymbolicT, SymbolicT}())
+                        typeof(sys)[], sources, nothing, Dict{SymbolicT, SymbolicT}(),
+                        array_groups, row_group, row_elem)
+end
+
+"""
+    $TYPEDSIGNATURES
+
+If `eq` is an array equation with a first-order derivative (with respect to `iv`) of an
+array unknown or a constant-index slice of one on exactly one side, return it oriented as
+`D(x[slice]) ~ rhs`. Return `nothing` for scalar equations and for array equations that
+cannot be tracked as a block (e.g. `D(x) .+ D(y) ~ 0`, `0 ~ f(x)`).
+"""
+function canonicalize_array_equation(eq::Equation, iv::SymbolicT)
+    (; lhs, rhs) = eq
+    SU.is_array_shape(SU.shape(lhs)) || return nothing
+    if is_array_unknown_derivative(lhs, iv)
+        is_array_unknown_derivative(rhs, iv) && return nothing
+        return eq
+    elseif is_array_unknown_derivative(rhs, iv)
+        return rhs ~ lhs
+    end
+    # Residual forms `resid ~ 0` / `0 ~ resid`, as emitted by finite-difference
+    # discretizations: `resid` is a broadcasted sum/difference with the derivative as one
+    # of its two operands.
+    if is_zero_array(rhs)
+        resid = lhs
+    elseif is_zero_array(lhs)
+        resid = rhs
+    else
+        return nothing
+    end
+    iscall(resid) || return nothing
+    operation(resid) === broadcast || return nothing
+    args = arguments(resid)
+    length(args) == 3 || return nothing
+    op = args[1]
+    SU.isconst(op) || return nothing
+    op = unwrap_const(op)
+    A, B = args[2], args[3]
+    isA = is_array_unknown_derivative(A, iv)
+    isB = is_array_unknown_derivative(B, iv)
+    isA == isB && return nothing
+    if op === (-)
+        # `D(x) - f = 0` or `f - D(x) = 0`
+        return isA ? (A ~ B) : (B ~ A)
+    elseif op === (+)
+        # `D(x) + f = 0`
+        f = isA ? B : A
+        return (isA ? A : B) ~ unwrap(-Symbolics.wrap(f))
+    end
+    return nothing
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Whether `x` is a constant array (or scalar) of zeros.
+"""
+function is_zero_array(x::SymbolicT)
+    @match x begin
+        BSImpl.Const(; val) => val isa AbstractArray ? all(iszero, val) : SU._iszero(x)
+        _ => false
+    end
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Whether `x` is `D(arr)` where `D` is the first-order derivative with respect to `iv` and
+`arr` is an array variable or a constant-index slice of one.
+"""
+function is_array_unknown_derivative(x::SymbolicT, iv::SymbolicT)
+    SU.is_array_shape(SU.shape(x)) || return false
+    iscall(x) || return false
+    f = operation(x)
+    f isa Differential || return false
+    isequal(f.x, iv) && f.order isa Int && isone(f.order) || return false
+    args = arguments(x)
+    length(args) == 1 || return false
+    arg = args[1]
+    SU.shape(arg) isa SU.ShapeVecT || return false
+    arr, isidx = MTKBase.split_indexed_var(arg)
+    if isidx
+        # `x[slice]`: every index must be constant so the elements are known statically
+        iscall(arg) || return false
+        operation(arg) === getindex || return false
+        all(SU.isconst, Iterators.drop(arguments(arg), 1)) || return false
+        return true
+    end
+    return MTKBase.isvariable(arg)
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Scalarize `eq` and append the resulting rows to `rows`, extending `row_group` and
+`row_elem` in parallel. If `eq` can be tracked as an [`ArrayEquationGroup`](@ref) (see
+[`canonicalize_array_equation`](@ref)), register it in `groups` and tag its rows. Return
+the number of rows appended.
+"""
+function append_equation_rows!(
+        rows::Vector{Equation}, row_group::Vector{Int}, row_elem::Vector{Int},
+        groups::Vector{ArrayEquationGroup}, eq::Equation, @nospecialize(iv::Union{SymbolicT, Nothing})
+    )
+    scalar_eqs = MTKBase.flatten_equation(eq)
+    n = length(scalar_eqs)
+    append!(rows, scalar_eqs)
+    canon = if iv isa SymbolicT && SU.is_array_shape(SU.shape(eq.lhs))
+        canonicalize_array_equation(eq, iv)
+    else
+        nothing
+    end
+    if canon !== nothing
+        lhs_vars = vec(collect(collect(canon.lhs)::AbstractArray{SymbolicT}))::Vector{SymbolicT}
+        # Row `k` is the equation of element `k` (`flatten_equation` and `collect` use the
+        # same element order), and the elements must be distinct.
+        ok = length(lhs_vars) == n && allunique(lhs_vars)
+        # For explicit forms, additionally check that the scalarized rows are indeed
+        # `D(x[k]) ~ rhs[k]` or `rhs[k] ~ D(x[k])`. Residual forms are verified when the
+        # rows are matched: a row not solved for its own element breaks the group.
+        explicit = canon.lhs === eq.lhs || canon.lhs === eq.rhs
+        if ok && explicit
+            for k in 1:n
+                seq = scalar_eqs[k]
+                if !(isequal(seq.lhs, lhs_vars[k]) || isequal(seq.rhs, lhs_vars[k]))
+                    ok = false
+                    break
+                end
+            end
+        end
+        if ok
+            push!(groups, ArrayEquationGroup(canon, lhs_vars))
+            g = length(groups)
+            append!(row_group, Iterators.repeated(g, n))
+            append!(row_elem, 1:n)
+            return n
+        end
+    end
+    append!(row_group, Iterators.repeated(0, n))
+    append!(row_elem, Iterators.repeated(0, n))
+    return n
 end
 
 """
@@ -736,9 +1028,12 @@ function scalarize_tearing_state_eqs!(ts::TearingState)
     # Early exit
     has_arr_eqs = any(eq -> SU.is_array_shape(SU.shape(eq.lhs)), arr_eqs)
     has_arr_eqs || iszero(Graphs.ne(ts.structure.graph)) || return ts
+    # Already scalarized (eagerly, with array equations tracked as groups).
+    has_arr_eqs || isempty(ts.array_groups) || return ts
 
     arr_orig_eqs = ts.original_eqs
     eqs_source = ts.eqs_source
+    iv = MTKBase.get_iv(ts.sys)
 
     new_eqs = Equation[]
     sizehint!(new_eqs, length(arr_eqs))
@@ -746,14 +1041,19 @@ function scalarize_tearing_state_eqs!(ts::TearingState)
     sizehint!(new_orig, length(arr_orig_eqs))
     new_sources = Vector{Vector{Symbol}}()
     sizehint!(new_sources, length(eqs_source))
+    # Rows of the deferred graph are unit equations and are never grouped, so the
+    # bookkeeping is rebuilt from scratch here.
+    array_groups = ArrayEquationGroup[]
+    row_group = Int[]
+    row_elem = Int[]
 
     for i in eachindex(arr_eqs)
-        scalar_eqs = MTKBase.flatten_equation(arr_eqs[i])
+        nrows = append_equation_rows!(new_eqs, row_group, row_elem, array_groups, arr_eqs[i], iv)
         scalar_orig_eqs = MTKBase.flatten_equation(arr_orig_eqs[i])
-        append!(new_eqs, scalar_eqs)
+        @assert length(scalar_orig_eqs) == nrows
         append!(new_orig, scalar_orig_eqs)
         if !isempty(eqs_source)
-            for _ in scalar_orig_eqs
+            for _ in 1:nrows
                 push!(new_sources, eqs_source[i])
             end
         end
@@ -802,6 +1102,9 @@ function scalarize_tearing_state_eqs!(ts::TearingState)
     ts.sys = sys
     ts.original_eqs = new_orig
     ts.eqs_source = new_sources
+    ts.array_groups = array_groups
+    ts.row_group = row_group
+    ts.row_elem = row_elem
 
     structure = ts.structure
     @set! structure.graph = complete(graph)
@@ -1096,5 +1399,9 @@ function shift_discrete_system(ts::TearingState)
 
     @set! ts.sys.eqs = eqs
     @set! ts.fullvars = fullvars
+    # Array blocks are only tracked for continuous differential equations.
+    for g in ts.array_groups
+        g.dirty = true
+    end
     return ts
 end

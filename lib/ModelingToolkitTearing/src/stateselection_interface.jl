@@ -68,6 +68,9 @@ StateSelection.get_mm(ts::TearingState) = ts.mm
 function StateSelection.eq_derivative!(ts::TearingState, ieq::Int; kwargs...)
     s = ts.structure
 
+    # Index reduction differentiating an element of an array equation means the block is
+    # part of a higher-index structure; emit it scalarized.
+    dirty_array_group!(ts, ieq)
     eq_diff = StateSelection.eq_derivative_graph!(s, ieq)
 
     mm = ts.mm
@@ -172,7 +175,15 @@ function StateSelection.linear_subsys_adjmat!(state::TearingState; kwargs...)
         #       ``∑ c_i * v_i = 0``,
         #
         # where ``c_i`` ∈ ℤ and ``v_i`` denotes unknowns.
-        if all_int_vars && Symbolics._iszero(rhs)
+        #
+        # Rows that are elements of an intact array equation (see `ArrayEquationGroup`)
+        # are not part of the integer-linear subsystem, even when they are integer-linear.
+        # Gaussian elimination of that subsystem (alias elimination, singularity removal,
+        # exact SCC matching) may replace a row by a linear combination of rows or use it as
+        # a pivot to rewrite other rows; either leaves the element's derivative matched to a
+        # different equation than its own, and the array equation can no longer be emitted
+        # as a unit. The rows keep their solvability information in `solvable_graph`.
+        if all_int_vars && Symbolics._iszero(rhs) && !is_intact_array_group_row(state, i)
             push!(linear_equations, i)
             push!(eadj, copy(𝑠neighbors(graph, i)))
             push!(cadj, copy(coeffs))
@@ -464,6 +475,12 @@ function StateSelection.rm_eqs_vars!(
     if !isempty(state.eqs_source)
         deleteat!(state.eqs_source, eqs_to_rm)
     end
+    # `eqs_to_rm` was sorted and uniqued in place by `default_rm_eqs_vars!`.
+    for ieq in eqs_to_rm
+        dirty_array_group!(state, ieq)
+    end
+    deleteat!(state.row_group, eqs_to_rm)
+    deleteat!(state.row_elem, eqs_to_rm)
 
     @set! sys.eqs = eqs
     state.sys = sys
