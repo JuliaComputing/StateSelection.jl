@@ -663,6 +663,23 @@ end
         # the linear subsystem must not use `D(x[1]) ~ -x[1] + y` to eliminate `y` from it.
         @named sys = System([D(x) ~ -x .+ y, y ~ sum(x), 0 ~ z^3 + z - y], t)
         ts = TearingState(sys)
+        mm = StateSelection.linear_subsys_adjmat!(ts)
+        group_rows = findall(!iszero, ts.row_group)
+        @test length(mm.nzrows) == 1
+        @test isempty(intersect(mm.nzrows, group_rows))
+        # The rows are still solvable for their derivatives.
+        sgraph = ts.structure.solvable_graph
+        for r in group_rows
+            dv = findfirst(isequal(D(x[ts.row_elem[r]])), ts.fullvars)
+            @test dv in BipartiteGraphs.𝑠neighbors(sgraph, r)
+        end
+        # Dirty groups are ordinary scalar rows and do take part.
+        ts = TearingState(sys)
+        MTKTearing.dirty_array_group!(ts, first(findall(!iszero, ts.row_group)))
+        mm = StateSelection.linear_subsys_adjmat!(ts)
+        @test length(mm.nzrows) == 4
+
+        ts = TearingState(sys)
         ModelingToolkit.alias_elimination!(ts)
         @test !only(ts.array_groups).dirty
         for (r, g) in enumerate(ts.row_group)

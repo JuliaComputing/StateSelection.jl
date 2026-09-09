@@ -175,7 +175,15 @@ function StateSelection.linear_subsys_adjmat!(state::TearingState; kwargs...)
         #       ``∑ c_i * v_i = 0``,
         #
         # where ``c_i`` ∈ ℤ and ``v_i`` denotes unknowns.
-        if all_int_vars && Symbolics._iszero(rhs)
+        #
+        # Rows that are elements of an intact array equation (see `ArrayEquationGroup`)
+        # are not part of the integer-linear subsystem, even when they are integer-linear.
+        # Gaussian elimination of that subsystem (alias elimination, singularity removal,
+        # exact SCC matching) may replace a row by a linear combination of rows or use it as
+        # a pivot to rewrite other rows; either leaves the element's derivative matched to a
+        # different equation than its own, and the array equation can no longer be emitted
+        # as a unit. The rows keep their solvability information in `solvable_graph`.
+        if all_int_vars && Symbolics._iszero(rhs) && !is_intact_array_group_row(state, i)
             push!(linear_equations, i)
             push!(eadj, copy(𝑠neighbors(graph, i)))
             push!(cadj, copy(coeffs))
@@ -186,56 +194,6 @@ function StateSelection.linear_subsys_adjmat!(state::TearingState; kwargs...)
         ndsts(graph),
         linear_equations, eadj, cadj)
     return mm
-end
-
-"""
-    $TYPEDSIGNATURES
-
-Split `mm` into the rows that are elements of array equations (see
-[`ArrayEquationGroup`](@ref)) and the rest. Returns `(rest, group_rows)` where `rest` is a
-`SparseMatrixCLIL` over the same parent rows and columns. Used with
-[`merge_array_group_rows`](@ref) to keep array equation rows out of Gaussian elimination
-of the integer-linear subsystem: an element of an array equation must neither be replaced
-by a linear combination of rows nor be used as a pivot to rewrite other rows (which would
-leave the element's derivative matched to a different equation), or the array equation
-can no longer be emitted as a unit. Excluding the rows is conservative: they are simply
-not part of the linear subsystem the elimination works on.
-"""
-function split_array_group_rows(state::TearingState, mm::CLIL.SparseMatrixCLIL{Int, Int})
-    empty = CLIL.SparseMatrixCLIL(mm.nparentrows, mm.ncols, Int[], Vector{Int}[], Vector{Int}[])
-    isempty(state.array_groups) && return mm, empty
-    keep = Int[]
-    split = Int[]
-    for (i, e) in enumerate(mm.nzrows)
-        push!(iszero(row_group(state, e)) ? keep : split, i)
-    end
-    isempty(split) && return mm, empty
-    rest = CLIL.SparseMatrixCLIL(
-        mm.nparentrows, mm.ncols, mm.nzrows[keep], mm.row_cols[keep], mm.row_vals[keep]
-    )
-    group_rows = CLIL.SparseMatrixCLIL(
-        mm.nparentrows, mm.ncols, mm.nzrows[split], mm.row_cols[split], mm.row_vals[split]
-    )
-    return rest, group_rows
-end
-
-"""
-    $TYPEDSIGNATURES
-
-Inverse of [`split_array_group_rows`](@ref): add the rows of `group_rows` back to `mm`,
-keeping `mm.nzrows` sorted.
-"""
-function merge_array_group_rows(
-        mm::CLIL.SparseMatrixCLIL{T, Int}, group_rows::CLIL.SparseMatrixCLIL{Int, Int}
-    ) where {T}
-    isempty(group_rows.nzrows) && return mm
-    nzrows = vcat(mm.nzrows, group_rows.nzrows)
-    row_cols = vcat(mm.row_cols, group_rows.row_cols)
-    row_vals = Vector{T}[mm.row_vals; map(Base.Fix1(convert, Vector{T}), group_rows.row_vals)]
-    perm = sortperm(nzrows)
-    return CLIL.SparseMatrixCLIL(
-        mm.nparentrows, mm.ncols, nzrows[perm], row_cols[perm], row_vals[perm]
-    )
 end
 
 function maybe_zeros_descend(ex::SymbolicT)

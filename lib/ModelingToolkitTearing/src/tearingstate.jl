@@ -202,6 +202,16 @@ end
 """
     $TYPEDSIGNATURES
 
+Whether row `ieq` is an element of an array equation that has not been marked dirty.
+"""
+function is_intact_array_group_row(ts::TearingState, ieq::Int)
+    g = row_group(ts, ieq)
+    return !iszero(g) && !ts.array_groups[g].dirty
+end
+
+"""
+    $TYPEDSIGNATURES
+
 Mark the array equation that row `ieq` belongs to (if any) as broken, so that its rows are
 emitted as scalar equations.
 """
