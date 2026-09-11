@@ -721,21 +721,41 @@ end
 Solve the numeric linear system emitted for an inlined linear SCC.
 
 `A` and `b` are the scratch buffers built by the `ArrayMaker` in
-[`get_linear_scc_linsol`](@ref). Both are rewritten entry by entry on every call, so this
-method overwrites `b` with the solution and returns it rather than allocating a result,
-and factorizes a copy of `A` rather than constructing a `LinearProblem` per call.
+[`get_linear_scc_linsol`](@ref), rewritten entry by entry on every call. The `LinearCache`
+is kept in task local storage and reused, so a steady state call neither builds a
+`LinearProblem` nor allocates a factorization. Going through `LinearSolve.jl` keeps its
+size dependent choice of factorization, which a direct `lu!` would give up.
 
-A rank-deficient `A` falls back to `LinearSolve.jl`'s default algorithm, which returns the
-minimum-norm least squares solution. `A` and `b` are left untouched on that path, as are
-systems that are not dense, which go through `LinearSolve.jl` as well.
+The cache is task local rather than stored alongside the system: the emitted expression is
+shared by every problem built from it, so a cache held there would be shared across threads
+while `A` and `b` are not.
+
+One cache is kept per element type and size, so a solve site can share with another of the
+same shape. The solution is therefore copied back into `b`, which belongs to this solve
+site alone, rather than returning the cache's own buffer.
 """
 function numeric_ldiv!(A::StridedMatrix, b::StridedVector)
-    Awork = similar(A)
-    copyto!(Awork, A)
-    fact = LinearAlgebra.lu!(Awork; check = false)
-    LinearAlgebra.issuccess(fact) || return CommonSolve.solve(LinearProblem(A, b)).u
-    LinearAlgebra.ldiv!(fact, b)
+    # the lookup is necessarily type unstable, so the solve goes behind a function barrier
+    return solve_into!(get_inline_linsolve_cache(A, b), A, b)
+end
+
+function solve_into!(cache, A::StridedMatrix, b::StridedVector)
+    copyto!(cache.A, A)
+    copyto!(cache.b, b)
+    cache.isfresh = true
+    copyto!(b, CommonSolve.solve!(cache).u)
     return b
+end
+
+function get_inline_linsolve_cache(A::StridedMatrix, b::StridedVector)
+    tls = task_local_storage()
+    key = (INLINE_LINSOLVE_CACHE, eltype(A), size(A, 1))
+    cache = get(tls, key, nothing)
+    if cache === nothing
+        cache = CommonSolve.init(LinearProblem(Matrix(A), Vector(b)))
+        tls[key] = cache
+    end
+    return cache
 end
 
 numeric_ldiv!(A, b) = CommonSolve.solve(LinearProblem(A, b)).u
@@ -754,6 +774,11 @@ function SU.promote_shape(::typeof(safe_ldiv), sha::SU.ShapeT, shb::SU.ShapeT)
 end
 
 const INLINE_LINEAR_SCC_OP = safe_ldiv
+
+"""
+Tag distinguishing this package's entries in task local storage. See [`numeric_ldiv!`](@ref).
+"""
+const INLINE_LINSOLVE_CACHE = :ModelingToolkitTearing_inline_linsolve_cache
 
 """
     $TYPEDSIGNATURES
