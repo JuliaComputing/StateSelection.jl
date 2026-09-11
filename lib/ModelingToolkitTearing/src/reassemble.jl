@@ -712,8 +712,33 @@ function safe_ldiv(A, b)
             shape = SU.promote_shape(safe_ldiv, SU.shape(A), SU.shape(b))
         )
     end
-    return CommonSolve.solve(LinearProblem(A, b)).u
+    return numeric_ldiv!(A, b)
 end
+
+"""
+    $TYPEDSIGNATURES
+
+Solve the numeric linear system emitted for an inlined linear SCC.
+
+`A` and `b` are the scratch buffers built by the `ArrayMaker` in
+[`get_linear_scc_linsol`](@ref). Both are rewritten entry by entry on every call, so this
+method overwrites `b` with the solution and returns it rather than allocating a result,
+and factorizes a copy of `A` rather than constructing a `LinearProblem` per call.
+
+A rank-deficient `A` falls back to `LinearSolve.jl`'s default algorithm, which returns the
+minimum-norm least squares solution. `A` and `b` are left untouched on that path, as are
+systems that are not dense, which go through `LinearSolve.jl` as well.
+"""
+function numeric_ldiv!(A::StridedMatrix, b::StridedVector)
+    Awork = similar(A)
+    copyto!(Awork, A)
+    fact = LinearAlgebra.lu!(Awork; check = false)
+    LinearAlgebra.issuccess(fact) || return CommonSolve.solve(LinearProblem(A, b)).u
+    LinearAlgebra.ldiv!(fact, b)
+    return b
+end
+
+numeric_ldiv!(A, b) = CommonSolve.solve(LinearProblem(A, b)).u
 
 function SU.promote_symtype(::typeof(safe_ldiv), TA::SU.TypeT, TB::SU.TypeT)
     return Vector{Real}

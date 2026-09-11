@@ -11,6 +11,7 @@ import SymbolicUtils as SU
 using SymbolicUtils: unwrap
 using Setfield
 using ForwardDiff
+using LinearAlgebra
 import ModelingToolkitBase as MTKBase
 
 @testset "`InferredDiscrete` validation" begin
@@ -140,6 +141,57 @@ end
         @test t isa ForwardDiff.Dual
         prob.f.f.f_iip(du, prob.u0, prob.p, t)
     end
+end
+
+@testset "Inline linear SCC solve does not allocate per call" begin
+    @variables x(t) = 1.0 y(t) = 1.0 z(t) = 1.0 w(t) = 1.0 q(t) = 1.0
+    reassemble_alg = MTKTearing.DefaultReassembleAlgorithm(; inline_linear_sccs = true)
+    # `A` depends on `x`, so the SCC cannot be solved symbolically and is emitted as a
+    # runtime solve. `D(q)` reads the SCC, so the solve is live in the RHS.
+    eqs = [
+        D(x) ~ 2t + 1,
+        (2 + x) * y + x * z + w ~ 4,
+        (4 + x) * y + 3z + 2w ~ 7,
+        2x * y + (3 + x) * z + w ~ 10,
+        D(q) ~ 2w + 3z + y,
+    ]
+    @mtkcompile sys = System(eqs, t) reassemble_alg = reassemble_alg
+
+    blk = only(MTKTearing.inline_linear_systems(sys))
+    @test SU.operation(unwrap(blk.expression)) === MTKTearing.INLINE_LINEAR_SCC_OP
+
+    prob = ODEProblem(sys, [], (0.0, 1.0))
+    du = similar(prob.u0)
+    f! = prob.f.f
+    f!(du, prob.u0, prob.p, 0.0)
+    # the solve used to build a fresh `LinearProblem` and `LinearCache` per call, which
+    # cost ~1.4 kB and 23 allocations regardless of the size of the system
+    @test @allocated(f!(du, prob.u0, prob.p, 0.0)) < 512
+
+    # the same system without inlining is the reference for the values
+    @mtkcompile refsys = System(eqs, t)
+    refprob = ODEProblem(refsys, [], (0.0, 1.0))
+    refdu = similar(refprob.u0)
+    refprob.f.f(refdu, refprob.u0, refprob.p, 0.0)
+    @test du[1] ≈ refdu[1]
+end
+
+@testset "`numeric_ldiv!` solves in place and stays rank tolerant" begin
+    A = [2.0 1.0; 1.0 3.0]
+    b = [1.0, 2.0]
+    expected = A \ b
+    u = MTKTearing.numeric_ldiv!(copy(A), b)
+    @test u ≈ expected
+    # the solution is written into `b`, which is scratch in the emitted code
+    @test b ≈ expected
+    @test u === b
+
+    # a singular system falls back to LinearSolve's default algorithm, which returns the
+    # minimum-norm least squares solution, and leaves the inputs alone
+    S = [1.0 2.0; 2.0 4.0]
+    Sb = [1.0, 2.0]
+    @test MTKTearing.numeric_ldiv!(copy(S), Sb) ≈ pinv(S) * Sb
+    @test Sb == [1.0, 2.0]
 end
 
 @testset "`inline_linear_systems` diagnostic" begin
