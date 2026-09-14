@@ -723,12 +723,10 @@ Solve the numeric linear system emitted for an inlined linear SCC.
 `A` and `b` are the scratch buffers built by the `ArrayMaker` in
 [`get_linear_scc_linsol`](@ref), rewritten entry by entry on every call. The `LinearCache`
 is kept in task local storage and reused, so a steady state call neither builds a
-`LinearProblem` nor allocates a factorization. Going through `LinearSolve.jl` keeps its
-size dependent choice of factorization, which a direct `lu!` would give up.
+`LinearProblem` nor allocates a factorization.
 
-The cache is task local rather than stored alongside the system: the emitted expression is
-shared by every problem built from it, so a cache held there would be shared across threads
-while `A` and `b` are not.
+The cache is task local because the emitted expression is shared by every problem built
+from it, while `A` and `b` are not.
 
 One cache is kept per element type and size, so a solve site can share with another of the
 same shape. The solution is therefore copied back into `b`, which belongs to this solve
@@ -740,9 +738,17 @@ function numeric_ldiv!(A::StridedMatrix, b::StridedVector)
 end
 
 function solve_into!(cache, A::StridedMatrix, b::StridedVector)
-    copyto!(cache.A, A)
-    copyto!(cache.b, b)
-    cache.isfresh = true
+    # Fill the cache's own buffers and assign them back, rather than writing through
+    # `cache.A` in place. The assignment is what runs LinearSolve's invalidation: it marks
+    # the factorization stale, and under `ForwardDiff` it also recomputes the partials of
+    # `A`. Mutating `cache.A` in place keeps the partials from the first solve, which
+    # silently returns stale derivatives on every later call.
+    Awork = cache.A
+    copyto!(Awork, A)
+    cache.A = Awork
+    bwork = cache.b
+    copyto!(bwork, b)
+    cache.b = bwork
     copyto!(b, CommonSolve.solve!(cache).u)
     return b
 end
@@ -752,6 +758,9 @@ function get_inline_linsolve_cache(A::StridedMatrix, b::StridedVector)
     key = (INLINE_LINSOLVE_CACHE, eltype(A), size(A, 1))
     cache = get(tls, key, nothing)
     if cache === nothing
+        # `A` and `b` are views into the diffcache buffers of whichever problem happens to
+        # call first, and the cache keeps what it is handed, so it needs dense copies it
+        # owns. The assignments in `solve_into!` rely on these concrete types too.
         cache = CommonSolve.init(LinearProblem(Matrix(A), Vector(b)))
         tls[key] = cache
     end
