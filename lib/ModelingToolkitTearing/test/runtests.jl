@@ -230,9 +230,9 @@ end
     @test !isapprox(J1, J2)
 
     # evaluating `prob1` on a cache already primed by `prob2` must still give `prob1`'s
-    # jacobian. Writing `A` into the cache without letting LinearSolve invalidate it keeps
-    # the partials of the first solve, which is silent: the values stay right and only the
-    # derivatives go stale.
+    # jacobian. Writing `A` into the cache without letting LinearSolve invalidate it leaves
+    # both the primal matrix and the partials of the previous solve in place, so the answer
+    # is the previous system's, and nothing warns.
     @test fetch(Threads.@spawn (jac(prob2, 0.3); jac(prob1, 0.3))) ≈ J1
     @test fetch(Threads.@spawn all(i -> jac(prob1, 0.3) ≈ J1, 1:5))
     @test fetch(Threads.@spawn all(i -> jac(prob1, 0.3) ≈ J1 && jac(prob2, 0.3) ≈ J2, 1:5))

@@ -739,10 +739,11 @@ end
 
 function solve_into!(cache, A::StridedMatrix, b::StridedVector)
     # Fill the cache's own buffers and assign them back, rather than writing through
-    # `cache.A` in place. The assignment is what runs LinearSolve's invalidation: it marks
-    # the factorization stale, and under `ForwardDiff` it also recomputes the partials of
-    # `A`. Mutating `cache.A` in place keeps the partials from the first solve, which
-    # silently returns stale derivatives on every later call.
+    # `cache.A` in place. The assignment is what runs LinearSolve's invalidation. Under
+    # `ForwardDiff` that matters twice over: a `DualLinearCache` keeps the primal matrix in
+    # a separate array and the partials behind their own validity flag, and an in place
+    # write reaches neither. The next solve then silently uses the previous call's matrix
+    # and partials, so both the values and the derivatives come back wrong.
     Awork = cache.A
     copyto!(Awork, A)
     cache.A = Awork
