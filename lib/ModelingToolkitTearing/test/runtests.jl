@@ -714,3 +714,62 @@ end
     MTKTearing.scalarize_tearing_state_eqs!(tss[cid])
     @test !iszero(Graphs.ne(tss[cid].structure.graph))
 end
+
+# A function of a whole array which cannot be scalarized, so that the unscalarized form of
+# an array variable survives into the compiled system.
+combine_array(v) = sum(v)
+@register_symbolic combine_array(v::AbstractVector)
+
+@testset "Shifts applied to whole array variables" begin
+    # https://github.com/SciML/ModelingToolkit.jl/issues/5169
+    k = ShiftIndex(t)
+    @variables y(t) ud(t) (xd(t))[1:2]
+    # The elements of `xd` are aliased away, so `fullvars` only holds the scalarized
+    # elements while the equation for `ud` uses the whole array.
+    common_eqs = [y ~ y(k - 1) + 1, xd[1] ~ y, xd[2] ~ 2y]
+
+    @named sys = System([common_eqs; ud ~ combine_array(xd(k - 1))], t)
+    @named ref = System([common_eqs; ud ~ xd(k - 1)[1] + xd(k - 1)[2]], t)
+    ss = mtkcompile(sys)
+    ssref = mtkcompile(ref)
+
+    @test issetequal(unknowns(ss), unknowns(ssref))
+    udeq = only(filter(eq -> isequal(eq.lhs, unwrap(ud)), observed(ss)))
+    # `xd` is used one tick back, so the observed equation for `ud` must refer to the
+    # same shifted variable the unknowns are lowered to.
+    prev = only(arguments(udeq.rhs))
+    @test issubset(Set(collect(prev)), Set(unknowns(ss)))
+
+    u0 = [y(k - 1) => 0.0, xd(k - 1) => [3.0, 4.0]]
+    prob = DiscreteProblem(ss, u0, (0, 5))
+    probref = DiscreteProblem(ssref, u0, (0, 5))
+    @test prob[ud] == probref[ud]
+end
+
+@testset "Shifts applied to whole array variables in a clock partition" begin
+    # https://github.com/SciML/ModelingToolkit.jl/issues/5169
+    dt = 0.1
+    k = ShiftIndex(Clock(dt))
+    @variables x(t) y(t) u(t) ud(t) (xd(t))[1:2]
+    eqs = [
+        xd[1] ~ Sample(dt)(y)
+        xd[2] ~ 2 * Sample(dt)(y)
+        ud ~ combine_array(xd(k - 1))
+        u ~ Hold(ud)
+        D(x) ~ -x + u
+        y ~ x
+    ]
+    @named sys = System(eqs, t)
+    ci = MTKTearing.infer_clocks!(MTKTearing.ClockInference(TearingState(sys)))
+    tss, _, continuous_id, _ = MTKTearing.split_system(ci)
+    disc = tss[findfirst(!=(continuous_id), eachindex(tss))]
+
+    # `split_system` shifts the discrete partition forward by one tick, and the
+    # unscalarized `xd` must be shifted along with its elements.
+    vars = Set{Symbolics.SymbolicT}()
+    for eq in equations(disc)
+        SU.search_variables!(vars, eq; is_atomic = MTKBase.OperatorIsAtomic{SU.Operator}())
+    end
+    @test unwrap(xd) in vars
+    @test !(unwrap(xd(k - 1)) in vars)
+end
