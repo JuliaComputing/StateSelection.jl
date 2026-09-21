@@ -2,8 +2,14 @@ function StateSelection.var_derivative!(ts::TearingState, v::Int)
     s = ts.structure
     var_diff = StateSelection.var_derivative_graph!(s, v)
     sys = ts.sys
-    D = Differential(MTKBase.get_iv(sys))
-    push!(ts.fullvars, D(ts.fullvars[v]))
+    iv = MTKBase.get_iv(sys)
+    # The variables of a discrete system are related by shifts, those of a continuous
+    # system by differentiation.
+    if StateSelection.is_only_discrete(s)
+        push!(ts.fullvars, MTKBase.simplify_shifts(Shift(iv, 1)(ts.fullvars[v])))
+    else
+        push!(ts.fullvars, Differential(iv)(ts.fullvars[v]))
+    end
     push!(ts.structure.state_priorities, ts.structure.state_priorities[v])
     push!(ts.structure.canonical_ranks, ts.structure.canonical_ranks[v] + 1)
     push!(ts.structure.var_types, ts.structure.var_types[v])
