@@ -1067,6 +1067,23 @@ function lower_order_var(dervar::SymbolicT, t::SymbolicT)
     end
 end
 
+"""
+    $(TYPEDSIGNATURES)
+
+Whether `k` is an array variable that is not itself in `fullvars_set` but all of whose
+scalar elements are. `fullvars` only ever holds scalarized array elements, so an array
+used as a whole (e.g. `f(x(k - 1))` with a registered `f(::AbstractVector)`) must be
+recognized through its elements. Otherwise `shift_discrete_system` shifts the elements
+forward but leaves the whole-array reference behind, and backshifting the resulting
+observed equation later produces a shift one step further back than the model asked for.
+"""
+function is_scalarized_in(k::SymbolicT, fullvars_set::Set{SymbolicT})
+    sh = SU.shape(k)
+    sh isa SU.ShapeVecT || return false
+    isempty(sh) && return false
+    return all(i -> k[i] in fullvars_set, SU.stable_eachindex(k))
+end
+
 function shift_discrete_system(ts::TearingState)
     # NOTE: `original_eqs` is intentionally not shifted here. This behavior is
     # necessary for hybrid system handling.
@@ -1080,8 +1097,8 @@ function shift_discrete_system(ts::TearingState)
     iv = MTKBase.get_iv(sys)::SymbolicT
     discmap = Dict{SymbolicT, SymbolicT}()
     for k in discvars
-        k in fullvars_set || continue
         MTKBase.isoperator(k, Union{Sample, Hold, Pre}) && continue
+        k in fullvars_set || is_scalarized_in(k, fullvars_set) || continue
         discmap[k] = MTKBase.simplify_shifts(Shift(iv, 1)(k))
     end
 
