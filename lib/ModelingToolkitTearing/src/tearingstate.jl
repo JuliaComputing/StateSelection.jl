@@ -913,13 +913,27 @@ function collect_vars_to_set!(buffer::Set{SymbolicT}, vars::Vector{SymbolicT})
             BSImpl.Term(; f, args) && if f === getindex end => push!(buffer, args[1])
             _ => nothing
         end
+        if Symbolics.issymstruct(x) #symstruct case
+            for leaf in collect(Symbolics.SymStruct{SU.symtype(x)}(x))::Vector{SymbolicT}
+                push!(buffer, leaf)
+            end
+            continue
+        end
         sh = SU.shape(x)
         sh isa SU.Unknown && continue
         sh = sh::SU.ShapeVecT
         isempty(sh) && continue
         idxs = SU.stable_eachindex(x)
         for i in idxs
-            push!(buffer, x[i])
+            el = x[i]
+            push!(buffer, el)
+            # An array of records looks like a plain array by shape, so each element is
+            # itself a record and its leaves have to be collected as well.
+            if Symbolics.issymstruct(el)
+                for leaf in collect(Symbolics.SymStruct{SU.symtype(el)}(el))::Vector{SymbolicT}
+                    push!(buffer, leaf)
+                end
+            end
         end
     end
 end

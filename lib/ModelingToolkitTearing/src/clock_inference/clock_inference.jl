@@ -362,6 +362,29 @@ function (iec::InferEquationClosure)(ieq::Int, eq::Equation, is_initialization_e
 end
 
 """
+    $TYPEDSIGNATURES
+
+The record instance that `x` projects a leaf out of, and whether it is such a projection at
+all. Field accesses are peeled and operators commute, but array indices are kept: separate
+elements of an array of records are separate instances, while the fields of one instance
+are not.
+"""
+function record_clock_root(x::SymbolicT)::Tuple{SymbolicT, Bool}
+    @match x begin
+        BSImpl.Term(; f, args) && if f isa Symbolics.SymbolicGetproperty end => begin
+            root, _ = record_clock_root(args[1]::SymbolicT)
+            return root, true
+        end
+        BSImpl.Term(; f, args) && if f isa SU.Operator && length(args) == 1 end => begin
+            root, isprojection = record_clock_root(args[1]::SymbolicT)
+            isprojection || return x, false
+            return f(root)::SymbolicT, true
+        end
+        _ => return x, false
+    end
+end
+
+"""
 Update the equation-to-time domain mapping by inferring the time domain from the variables.
 """
 function infer_clocks!(ci::ClockInference)
@@ -390,6 +413,17 @@ function infer_clocks!(ci::ClockInference)
             _ => nothing
         end
     end
+    # The fields of a record share a clock: a struct may not be differentially clocked.
+    # Separate elements of an array of records are separate instances and may differ.
+    record_group = Dict{SymbolicT, Int}()
+    for (i, v) in enumerate(fullvars)
+        root, isprojection = record_clock_root(v)
+        isprojection || continue
+        j = get!(record_group, root, i)
+        j == i && continue
+        add_edge!(inference_graph, (ClockVertex.Variable(i), ClockVertex.Variable(j)))
+    end
+
     infer_equation = InferEquationClosure(var_to_idx, inference_graph)
 
     for (ieq, eq) in enumerate(MTKBase.equations(sys))
