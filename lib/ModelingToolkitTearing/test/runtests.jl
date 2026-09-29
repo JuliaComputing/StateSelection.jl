@@ -715,6 +715,27 @@ end
     @test !iszero(Graphs.ne(tss[cid].structure.graph))
 end
 
+@testset "Alias of a variable shifted in a discrete system" begin
+    # The alias `z ~ y` with `y ~ u(k - 1)` eliminates `u` in favour of `Shift(t, 1)(y)`,
+    # and the shifted form of the alias target must be built as a shift, not as a
+    # differential.
+    k = ShiftIndex(t)
+    @parameters p = 3.0
+    @variables u(t) y(t) z(t)
+    @named sys = System([u ~ p, y ~ u(k - 1), z ~ y], t)
+    ss = mtkcompile(sys)
+    @test length(unknowns(ss)) == 1
+    for eq in [equations(ss); observed(ss)]
+        @test !MTKBase.isdifferential(eq.lhs)
+        @test !MTKBase.isdifferential(eq.rhs)
+    end
+    # `DiscreteProblem` advances the state one tick during construction, so `y` takes
+    # the value of `u` at the initial tick.
+    prob = DiscreteProblem(ss, [y => 0.0], (0, 5))
+    @test prob[y] == 3.0
+    @test prob[z] == 3.0
+end
+
 # A function of a whole array which cannot be scalarized, so that the unscalarized form of
 # an array variable survives into the compiled system.
 combine_array(v) = sum(v)
