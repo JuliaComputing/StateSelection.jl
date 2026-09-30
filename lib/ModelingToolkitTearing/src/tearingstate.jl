@@ -112,10 +112,79 @@ mutable struct TearingState <: StateSelection.TransformationState{System}
     and put into `additional_observed`.
     """
     analytical_derivatives::Dict{SymbolicT, SymbolicT}
+    """
+    Lazily built substituter evaluating expressions at the initial point of `sys`, see
+    [`initial_point_substituter`](@ref). `nothing` until first used.
+    """
+    initial_point::Base.RefValue{Any}
 end
 
 function Base.show(io::IO, state::TearingState)
     print(io, "TearingState of ", typeof(state.sys))
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Build a substituter that evaluates expressions at the initial point of `sys`: parameters
+take their bindings, unknowns their initial conditions, and the independent variable the
+start of `get_tspan(sys)` when the system has a `tspan`. Values given in `initial_point`
+(an iterable of `variable => value` pairs or a dict, e.g. the `u0` map later passed to the
+problem constructor) take precedence over all of these. Guesses are deliberately not
+used: they are starting points for the initialization solver, not the initial point.
+Variables without a value stay symbolic, so an expression depending on them does not
+evaluate to a number.
+"""
+function initial_point_substituter(sys::System; initial_point = nothing)
+    defs = copy(parent(bindings(sys)))
+    MTKBase.left_merge!(defs, initial_conditions(sys))
+    iv = MTKBase.get_iv(sys)
+    tspan = MTKBase.get_tspan(sys)
+    if iv !== nothing && tspan !== nothing && first(tspan) isa Real
+        defs[iv] = BSImpl.Const{VartypeT}(first(tspan))
+    end
+    if initial_point !== nothing
+        for (k, v) in initial_point
+            defs[unwrap(k)] = v isa SymbolicT ? v : BSImpl.Const{VartypeT}(v)
+        end
+    end
+    filter!(Base.Fix2(!==, MTKBase.COMMON_MISSING) ∘ last, defs)
+    return Symbolics.FixpointSubstituter{true}(
+        MTKBase.AADSubWrapper(defs); maxiters = clamp(length(defs), 10, 1000),
+        warn_maxiters = false
+    )
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Evaluate `ex` at the initial point of `state.sys` (see [`initial_point_substituter`](@ref)).
+Returns the value as a `Float64`, or `nothing` if `ex` does not reduce to a finite real
+number there, including when evaluating it throws (e.g. a `DomainError`).
+
+The substituter is built on first use and cached in `state.initial_point`. This relies on
+the bindings, initial conditions and `tspan` of `state.sys` not changing during structural
+simplification, which holds for all passes that replace `state.sys`.
+"""
+function evaluate_at_initial_point(state::TearingState, ex)
+    ex = unwrap(ex)
+    if !(ex isa SymbolicT)
+        return ex isa Real ? Float64(ex) : nothing
+    end
+    subber = state.initial_point[]
+    if subber === nothing
+        subber = state.initial_point[] = initial_point_substituter(state.sys)
+    end
+    val = try
+        subber(ex)
+    catch err
+        @debug "Evaluating an expression at the initial point failed" ex err
+        return nothing
+    end
+    SU.isconst(val) || return nothing
+    val = SU.unwrap_const(val)
+    val isa Real || return nothing
+    return Float64(val)
 end
 
 StateSelection.has_equations(::TearingState) = true
@@ -510,7 +579,8 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
                                 canonical_ranks, false)
     return TearingState(sys, fullvars, structure, Equation[], param_derivative_map,
                         no_deriv_params, original_eqs, Equation[], falses(length(fullvars)),
-                        typeof(sys)[], sources, nothing, Dict{SymbolicT, SymbolicT}())
+                        typeof(sys)[], sources, nothing, Dict{SymbolicT, SymbolicT}(),
+                        Base.RefValue{Any}(nothing))
 end
 
 """

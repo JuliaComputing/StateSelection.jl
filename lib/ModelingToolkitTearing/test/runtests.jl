@@ -794,3 +794,52 @@ end
     @test unwrap(xd) in vars
     @test !(unwrap(xd(k - 1)) in vars)
 end
+
+@testset "`evaluate_at_initial_point`" begin
+    @variables x(t) [guess = 2.0] y(t) z(t)
+    @parameters p = 3.0
+    @named sys = System([D(x) ~ y + z, D(z) ~ p * x], t; initial_conditions = [y => 4.0])
+    ts = TearingState(sys)
+    @test MTKTearing.evaluate_at_initial_point(ts, y * p) == 12.0
+    @test MTKTearing.evaluate_at_initial_point(ts, y - 4) == 0.0
+    @test MTKTearing.evaluate_at_initial_point(ts, 1.5) == 1.5
+    # guesses are not the initial point, and `z` has no value at all
+    @test MTKTearing.evaluate_at_initial_point(ts, x + p) === nothing
+    @test MTKTearing.evaluate_at_initial_point(ts, z + 1) === nothing
+    # without a `tspan` the initial time is unknown
+    @test MTKTearing.evaluate_at_initial_point(ts, sin(t)) === nothing
+    @test MTKTearing.is_zero_at_initial_point(ts, y - 4)
+    @test MTKTearing.is_zero_at_initial_point(ts, [p, y - 4])
+    @test !MTKTearing.is_zero_at_initial_point(ts, z)
+    # evaluation errors are not zero either
+    @test !MTKTearing.is_zero_at_initial_point(ts, sqrt(-y))
+    # the start of `tspan` is the initial time
+    @named sys = System([D(x) ~ y + z, D(z) ~ p * x], t; tspan = (1.0, 2.0))
+    ts = TearingState(sys)
+    @test MTKTearing.evaluate_at_initial_point(ts, 2t) == 2.0
+    # an explicit initial point takes precedence over everything
+    ts.initial_point[] = MTKTearing.initial_point_substituter(
+        ts.sys; initial_point = [x => 1.0, z => 2.0, t => 0.0]
+    )
+    @test MTKTearing.evaluate_at_initial_point(ts, x + z + t) == 3.0
+end
+
+@testset "coefficients that vanish at the initial point are not divided by" begin
+    @variables x(t) y(t)
+    @parameters p = 1.0 q = 1.0
+    # `sin(t)` is zero at `t = 0`, so `y` cannot be solved for from the second equation
+    @mtkcompile sys = System([D(x) ~ y, sin(t) * y ~ x], t; tspan = (0.0, 2.0))
+    @test issetequal(unknowns(sys), [x, y])
+    @test isempty(observables(sys))
+    # ... but it is not zero at `t = 1`, and unknown without a `tspan`
+    @mtkcompile sys = System([D(x) ~ y, sin(t) * y ~ x], t; tspan = (1.0, 2.0))
+    @test issetequal(unknowns(sys), [x])
+    @test issetequal(observables(sys), [y])
+    @mtkcompile sys = System([D(x) ~ y, sin(t) * y ~ x], t)
+    @test issetequal(unknowns(sys), [x])
+    # a combination of parameters that vanishes at their default values
+    @mtkcompile sys = System([D(x) ~ y, (p - q) * y ~ x], t)
+    @test issetequal(unknowns(sys), [x, y])
+    @mtkcompile sys = System([D(x) ~ y, (p + q) * y ~ x], t)
+    @test issetequal(unknowns(sys), [x])
+end
