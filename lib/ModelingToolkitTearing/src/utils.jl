@@ -35,6 +35,18 @@ function descend_lower_shift_varname(var, iv)
     end
 end
 
+"""
+    $TYPEDSIGNATURES
+
+Remove all `Shift`s applied to `var` and return the variable they are applied to.
+"""
+function strip_shifts(var::SymbolicT)
+    @match var begin
+        BSImpl.Term(; f, args) && if f isa Shift end => strip_shifts(args[1])
+        _ => var
+    end
+end
+
 function is_time_dependent_parameter(p::SymbolicT, allps::Set{SymbolicT}, iv::SymbolicT)
     return p in allps && @match p begin
         BSImpl.Term(; f, args) => begin

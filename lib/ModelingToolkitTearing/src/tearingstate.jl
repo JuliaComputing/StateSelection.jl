@@ -1072,6 +1072,17 @@ function shift_discrete_system(ts::TearingState)
     # necessary for hybrid system handling.
     (; fullvars, sys) = ts
     fullvars_set = Set{SymbolicT}(fullvars)
+    # `fullvars` only contains scalarized array elements, so an array variable used
+    # without scalarization (as in `f(x(k - 1))` for an array `x`) is absent from
+    # `fullvars_set` and would be left unshifted while its elements are shifted, which
+    # puts the two forms one tick apart. Add the arrays the scalarized elements belong
+    # to, so that both forms are shifted alike; the `isoperator` check below discards
+    # the entries that are a `Sample`, `Hold` or `Pre` of an array.
+    for v in fullvars
+        arr, isidx = MTKBase.split_indexed_var(v)
+        isidx || continue
+        push!(fullvars_set, strip_shifts(arr))
+    end
     discvars = OrderedSet{SymbolicT}()
     eqs = equations(sys)
     for eq in eqs
