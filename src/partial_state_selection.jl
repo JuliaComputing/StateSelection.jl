@@ -1,4 +1,5 @@
 using BipartiteGraphs: Unassigned, maximal_matching
+using LinearAlgebra: norm
 
 function partial_state_selection_graph!(state::TransformationState)
     var_eq_matching = complete(pantelides!(state))
@@ -175,19 +176,110 @@ function partial_state_selection_graph!(structure::SystemStructure, var_eq_match
 end
 
 function dummy_derivative_graph!(state::TransformationState, jac = nothing;
-        state_priority = nothing, log = Val(false), kwargs...)
+        state_priority = nothing, log = Val(false), numjac = nothing, kwargs...)
     state.structure.solvable_graph === nothing && find_solvables!(state; kwargs...)
     complete!(state.structure)
     var_eq_matching = complete(pantelides!(state; kwargs...))
     # NOTE: `get_mm` must be queried after `pantelides!`, which extends the
     # linear subsystem matrix with differentiated rows (`eq_derivative!`).
     dummy_derivative_graph!(
-        state.structure, var_eq_matching, jac, state_priority, log; mm = get_mm(state))
+        state.structure, var_eq_matching, jac, state_priority, log;
+        mm = get_mm(state), numjac)
 end
 
 struct DummyDerivativeSummary
     var_sccs::Vector{Vector{Int}}
     state_priority::Vector{Vector{Float64}}
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Greedily select, in the given order, the columns of `J` that are numerically linearly
+independent of the previously selected ones. Rows are first scaled to unit maximum
+magnitude, which does not change which column sets are singular but makes the test
+independent of the units of the equations. A column is skipped when its norm is below
+`rtol` times the largest column norm, and accepted when the norm of its component
+orthogonal to the span of the accepted columns exceeds `rtol` times its own norm. At most
+`size(J, 1)` columns are selected.
+"""
+function numerically_independent_columns(
+        J::AbstractMatrix{<:Real}, cols; rtol::Float64 = sqrt(eps(Float64))
+    )
+    m = size(J, 1)
+    rowscale = [(s = maximum(abs, @view J[i, :]); s > 0 ? inv(s) : 1.0) for i in 1:m]
+    maxnorm = maximum((norm(rowscale .* @view J[:, c]) for c in axes(J, 2)); init = 0.0)
+    basis = Vector{Vector{Float64}}()
+    accepted = Int[]
+    r = zeros(m)
+    for c in cols
+        r .= rowscale .* @view J[:, c]
+        nc = norm(r)
+        nc > rtol * maxnorm || continue
+        # two passes of modified Gram-Schmidt for numerical stability
+        for _ in 1:2, q in basis
+            r .-= (q' * r) .* q
+        end
+        nr = norm(r)
+        nr > rtol * nc || continue
+        push!(basis, r ./ nr)
+        push!(accepted, c)
+        length(accepted) == m && break
+    end
+    return accepted
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Select dummy derivatives among `vars` for the equations `eqs` by structural rank: walk
+`vars` in order and accept a variable when an augmenting path to an unmatched equation
+exists. Accepted variables are appended to `dummy_derivatives`. Returns the rank found.
+"""
+function structural_rank_selection!(
+        dummy_derivatives::Vector{Int}, vars::Vector{Int}, eqs::Vector{Int},
+        rank_matching::Matching, invgraph, eqs_set::BitSet, eqcolor::BitVector, nrows::Int
+    )
+    empty!(eqs_set)
+    union!(eqs_set, eqs)
+    rank = 0
+    for var in vars
+        eqcolor .= false
+        # We need `invgraph` here because we are matching from
+        # variables to equations.
+        pathfound = construct_augmenting_path!(rank_matching, invgraph, var,
+            Base.Fix2(in, eqs_set), eqcolor)
+        pathfound || continue
+        push!(dummy_derivatives, var)
+        rank += 1
+        rank == nrows && break
+    end
+    fill!(rank_matching, unassigned)
+    return rank
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Return the highest-derivative dummy-derivative candidates incident to the equations `eqs`
+that are not in `vars` and that `var_eq_matching` leaves unassigned, i.e. that would become
+differential states. Sorted by variable index.
+"""
+function unassigned_candidates(
+        structure::SystemStructure, var_eq_matching, eqs::Vector{Int}, vars::Vector{Int}
+    )
+    (; var_to_diff, graph) = structure
+    diff_to_var = invview(var_to_diff)
+    extra = Int[]
+    for eq in eqs, var in 𝑠neighbors(graph, eq)
+        var_eq_matching[var] === unassigned || continue
+        var_to_diff[var] === nothing || continue
+        diff_to_var[var] !== nothing && is_present(structure, var) || continue
+        var in vars && continue
+        var in extra && continue
+        push!(extra, var)
+    end
+    return sort!(extra)
 end
 
 """
@@ -202,12 +294,25 @@ Perform the dummy derivatives algorithm.
   return `nothing`.
 - `state_priority` is a function taking the index of a variable and returning its
   priority. Higher priority variables are more likely to be chosen as states.
+
+# Keyword Arguments
+
+- `numjac` is `nothing` or a function taking a list of equation and variable indices and
+  returning the jacobian for the same evaluated numerically at the initial point, as a
+  matrix of finite reals, or `nothing` if it cannot be evaluated. It is only consulted for
+  SCCs without an integer jacobian, after the structural selection: when the variables
+  selected as dummy derivatives have a numerically rank-deficient jacobian at the initial
+  point, the candidates are reordered so that a numerically independent set (found greedily
+  in priority order) is selected instead. If the candidates matched in the SCC admit no
+  such set, the highest derivatives incident to its equations that the matching left
+  unassigned are added to the candidates. When no such set exists at all, a warning is
+  emitted and the structural selection is kept.
 """
 function dummy_derivative_graph!(
         structure::SystemStructure, var_eq_matching, jac = nothing,
         state_priority = nothing, ::Val{log} = Val(false);
         tearing_alg::TearingAlgorithm = DummyDerivativeTearing(),
-        mm = nothing, kwargs...) where {log}
+        mm = nothing, numjac = nothing, kwargs...) where {log}
     (; eq_to_diff, var_to_diff, graph) = structure
     diff_to_eq = invview(eq_to_diff)
     diff_to_var = invview(var_to_diff)
@@ -314,21 +419,60 @@ function dummy_derivative_graph!(
                     push!(dummy_derivatives, vars[col_order[i]])
                 end
             else
-                empty!(eqs_set)
-                union!(eqs_set, eqs)
-                rank = 0
-                for var in vars
-                    eqcolor .= false
-                    # We need `invgraph` here because we are matching from
-                    # variables to equations.
-                    pathfound = construct_augmenting_path!(rank_matching, invgraph, var,
-                        Base.Fix2(in, eqs_set), eqcolor)
-                    pathfound || continue
-                    push!(dummy_derivatives, var)
-                    rank += 1
-                    rank == nrows && break
+                n_before = length(dummy_derivatives)
+                rank = structural_rank_selection!(
+                    dummy_derivatives, vars, eqs, rank_matching, invgraph, eqs_set,
+                    eqcolor, nrows)
+                # The structural choice may be singular at the initial point (e.g. a
+                # constraint jacobian column that vanishes there). Only then, reorder the
+                # candidates by a numerically independent set and select again. This is
+                # done at every differentiation level: the highest level also contains
+                # the differentiated kinematic equations, which can hide a singular
+                # choice of coordinates. The order of `vars` is inherited by the lower
+                # levels.
+                Jn = (numjac !== nothing && rank == nrows) ? numjac(eqs, vars) : nothing
+                if Jn !== nothing && size(Jn) == (nrows, length(vars))
+                    chosen_cols = Int[
+                        findfirst(==(v), vars)
+                        for v in @view dummy_derivatives[(n_before + 1):end]
+                    ]
+                    if length(numerically_independent_columns(Jn, chosen_cols)) != nrows
+                        pivots = numerically_independent_columns(Jn, eachindex(vars))
+                        if length(pivots) != nrows && isfirst
+                            # The matched candidates alone are singular. Widen the pool
+                            # with the highest derivatives incident to `eqs` that the
+                            # matching left unassigned (i.e. would become states), so
+                            # that one of them can be eliminated instead.
+                            extra = unassigned_candidates(structure, var_eq_matching, eqs, vars)
+                            sort!(extra; by = var -> (
+                                state_priority === nothing ? 0 : extended_sp(var),
+                                cranks === nothing ? 0 : cranks[var]))
+                            Jn_ext = isempty(extra) ? nothing : numjac(eqs, vcat(vars, extra))
+                            if Jn_ext !== nothing && size(Jn_ext) == (nrows, length(vars) + length(extra))
+                                pivots_ext = numerically_independent_columns(Jn_ext, axes(Jn_ext, 2))
+                                if length(pivots_ext) == nrows
+                                    append!(vars, extra)
+                                    pivots = pivots_ext
+                                end
+                            end
+                        end
+                        @debug "Dummy derivative selection singular at the initial point" eqs = repr(eqs) vars = repr(vars) chosen_cols = repr(chosen_cols) pivots = repr(pivots)
+                        if length(pivots) == nrows
+                            perm = vcat(pivots, setdiff(eachindex(vars), pivots))
+                            permute!(vars, perm)
+                            if state_priority !== nothing && isfirst
+                                var_dummy_scc[end] = copy(vars)
+                                var_state_priority[end] = extended_sp.(vars)
+                            end
+                            resize!(dummy_derivatives, n_before)
+                            rank = structural_rank_selection!(
+                                dummy_derivatives, vars, eqs, rank_matching, invgraph,
+                                eqs_set, eqcolor, nrows)
+                        else
+                            @warn "The dummy derivatives selected for a set of $(nrows) differentiated equations are numerically singular at the initial point, and no non-singular selection was found among the candidates at this differentiation level. Consider changing the initial point or the `state_priority` of the involved variables."
+                        end
+                    end
                 end
-                fill!(rank_matching, unassigned)
             end
             if rank != nrows
                 @warn "The DAE system is singular!"
