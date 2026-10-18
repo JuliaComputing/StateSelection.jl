@@ -146,6 +146,31 @@ function Base.push!(ev::EquationsView, eq)
     push!(ev.ts.extra_eqs, eq)
 end
 
+"""
+    $(TYPEDSIGNATURES)
+
+The message for a symbol that occurs in the system without being declared in it.
+
+`v` is what the equations mention and `v′` what it projects from - the two differ when `v`
+is an array element or a field of a record. Neither being an unknown means the system was
+never told about it, which is most often a symbol introduced for a value (an initial
+condition, or a field destructured out of a record) and then left out of the parameter
+list.
+"""
+function unknown_or_parameter_message(v, v′)
+    origin = isequal(v, v′) ? "`$v`" : "`$v`, which projects from `$v′`,"
+    return """
+    $origin occurs in the system but is neither an unknown nor a parameter of it.
+
+    Declare it in the system, in whichever list it belongs to:
+
+        System(eqs, t, [unknowns...], [parameters..., $v′])
+
+    A symbol used only to give something a value - an initial condition, or a field \
+    destructured out of a record - is a parameter, and has to be passed as one.
+    """
+end
+
 function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationSourceInformation} = nothing; check::Bool = true, sort_eqs::Bool = true, defer_scalarization::Bool = false)
     # flatten system
     if source_info === nothing
@@ -295,7 +320,7 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
                     end
                 end
                 if !isvalid
-                    throw(ArgumentError("$v is present in the system but $v′ is not an unknown."))
+                    throw(ArgumentError(unknown_or_parameter_message(v, v′)))
                 end
 
                 isempty(SU.shape(v)::SU.ShapeVecT) && addvar!(v, VARIABLE)
@@ -385,7 +410,7 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
                 end
             end
             if !isvalid
-                throw(ArgumentError("$v is present in the system but $v′ is not an unknown."))
+                throw(ArgumentError(unknown_or_parameter_message(v, v′)))
             end
 
             addvar!(v, VARIABLE)
