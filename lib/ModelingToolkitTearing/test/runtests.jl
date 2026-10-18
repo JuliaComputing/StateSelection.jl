@@ -176,15 +176,14 @@ end
     @test du[1] ≈ refdu[1]
 end
 
-@testset "`numeric_ldiv!` solves in place and stays rank tolerant" begin
+@testset "`numeric_ldiv!` leaves `b` alone and stays rank tolerant" begin
     A = [2.0 1.0; 1.0 3.0]
     b = [1.0, 2.0]
     expected = A \ b
     u = MTKTearing.numeric_ldiv!(copy(A), b)
     @test u ≈ expected
-    # the solution is written into `b`, which is scratch in the emitted code
-    @test b ≈ expected
-    @test u === b
+    # the emitted code can pass the same `b` buffer to several solve sites
+    @test b == [1.0, 2.0]
 
     # reusing the cache must not carry anything over between solves
     A2 = [4.0 1.0; 2.0 5.0]
@@ -266,6 +265,35 @@ end
     refdu = similar(refprob.u0)
     refprob.f.f(refdu, refprob.u0, refprob.p, 0.0)
     @test du[1] ≈ refdu[1]
+end
+
+@testset "Inline linear SCCs with the same `A` or `b` are solved independently" begin
+    @variables x(t) q1(t) q2(t) q3(t) y1(t) z1(t) y2(t) z2(t) y3(t) z3(t)
+    reassemble_alg = MTKTearing.DefaultReassembleAlgorithm(; inline_linear_sccs = true)
+    # blocks 1 and 2 share `b` and blocks 1 and 3 share `A`, so their solves share buffers
+    @mtkcompile sys = System(
+        [
+            D(x) ~ 1,
+            x * y1 + 2x * z1 ~ 1,
+            3x * y1 + x * z1 ~ 2,
+            2x * y2 + 2x * z2 ~ 1,
+            3x * y2 + x * z2 ~ 2,
+            x * y3 + 2x * z3 ~ 3,
+            3x * y3 + x * z3 ~ 5,
+            D(q1) ~ y1,
+            D(q2) ~ y2,
+            D(q3) ~ y3,
+        ],
+        t
+    ) reassemble_alg = reassemble_alg
+    @test length(MTKTearing.inline_linear_systems(sys)) == 3
+
+    prob = ODEProblem(sys, [x => 2.0, q1 => 0.0, q2 => 0.0, q3 => 0.0], (0.0, 1.0))
+    du = prob.f(prob.u0, prob.p, 0.0)
+    # solved by hand at x = 2
+    @test du[findfirst(isequal(q1), unknowns(sys))] ≈ 0.3
+    @test du[findfirst(isequal(q2), unknowns(sys))] ≈ 0.375
+    @test du[findfirst(isequal(q3), unknowns(sys))] ≈ 0.7
 end
 
 @testset "`inline_linear_systems` diagnostic" begin
