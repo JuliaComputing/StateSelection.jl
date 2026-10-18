@@ -755,17 +755,22 @@ function solve_into!(cache, A::AbstractMatrix, b::AbstractVector)
 end
 
 function get_inline_linsolve_cache(A::AbstractMatrix, b::AbstractVector)
-    tls = task_local_storage()
-    key = (INLINE_LINSOLVE_CACHE, typeof(A), size(A))
-    cache = get(tls, key, nothing)
-    if cache === nothing
-        # `A` and `b` are views into the diffcache buffers of whichever problem happens
-        # to call first, and the cache keeps what it is handed, so it needs copies it owns.
-        # `copy` rather than `Matrix`/`Vector` so the cache keeps the array type it was
-        # given, which matters for anything living off the CPU.
-        cache = CommonSolve.init(LinearProblem(copy(A), copy(b)))
-        tls[key] = cache
-    end
+    # one typed `Dict` under a `Symbol` key, since a tuple key into task local storage
+    # (an `IdDict{Any, Any}`) would be boxed on every call
+    caches = get!(InlineLinsolveCachesT, task_local_storage(),
+        INLINE_LINSOLVE_CACHE)::InlineLinsolveCachesT
+    cache = get(caches, (typeof(A), size(A)), nothing)
+    return cache === nothing ? init_inline_linsolve_cache!(caches, A, b) : cache
+end
+
+# out of line, since inlined it slows every inline solve by ~25 ns on Julia 1.13
+@noinline function init_inline_linsolve_cache!(caches, A::AbstractMatrix, b::AbstractVector)
+    # `A` and `b` are views into the diffcache buffers of whichever problem happens
+    # to call first, and the cache keeps what it is handed, so it needs copies it owns.
+    # `copy` rather than `Matrix`/`Vector` so the cache keeps the array type it was
+    # given, which matters for anything living off the CPU.
+    cache = CommonSolve.init(LinearProblem(copy(A), copy(b)))
+    caches[(typeof(A), size(A))] = cache
     return cache
 end
 
@@ -787,9 +792,12 @@ end
 const INLINE_LINEAR_SCC_OP = safe_ldiv
 
 """
-Tag distinguishing this package's entries in task local storage. See [`numeric_ldiv!`](@ref).
+Key of this package's entry in task local storage, which holds the `LinearCache`s of
+[`numeric_ldiv!`](@ref) by array type and size.
 """
 const INLINE_LINSOLVE_CACHE = :ModelingToolkitTearing_inline_linsolve_cache
+
+const InlineLinsolveCachesT = Dict{Tuple{DataType, Dims{2}}, Any}
 
 """
     $TYPEDSIGNATURES

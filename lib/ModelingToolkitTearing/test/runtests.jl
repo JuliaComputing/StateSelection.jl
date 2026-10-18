@@ -166,7 +166,11 @@ end
     f!(du, prob.u0, prob.p, 0.0)
     # the solve used to build a fresh `LinearProblem` and `LinearCache` per call, which
     # cost ~1.4 kB and 23 allocations regardless of the size of the system
-    @test @allocated(f!(du, prob.u0, prob.p, 0.0)) < 512
+    @test @allocated(f!(du, prob.u0, prob.p, 0.0)) < 256
+    # and the cache lookup used to box its key on every call
+    A, b = rand(2, 2), rand(2)
+    MTKTearing.get_inline_linsolve_cache(A, b)
+    @test @allocated(MTKTearing.get_inline_linsolve_cache(A, b)) == 0
 
     # the same system without inlining is the reference for the values
     @mtkcompile refsys = System(eqs, t)
