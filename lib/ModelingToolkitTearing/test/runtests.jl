@@ -794,3 +794,27 @@ end
     @test unwrap(xd) in vars
     @test !(unwrap(xd(k - 1)) in vars)
 end
+
+# https://github.com/JuliaComputing/StateSelection.jl/issues/170
+@testset "State machine query operators construct symbolic terms" begin
+    @named s1 = System(Equation[], t, [], [])
+    for (f, T) in [(MTKTearing.timeInState, Real),
+        (MTKTearing.ticksInState, Integer),
+        (MTKTearing.entry, Bool),
+        (MTKTearing.activeState, Bool)]
+        x = unwrap(f(s1))
+        @test SU.iscall(x)
+        @test SU.operation(x) === f
+        @test SU.unwrap_const(only(SU.arguments(x))) === s1
+        @test SU.symtype(x) === T
+        @test SU.shape(x) == SU.ShapeVecT()
+        f === MTKTearing.activeState && continue
+        x = unwrap(f())
+        @test SU.iscall(x)
+        @test SU.operation(x) === f
+        @test isempty(SU.arguments(x))
+        @test SU.symtype(x) === T
+        @test SU.shape(x) == SU.ShapeVecT()
+    end
+    @test_throws MethodError MTKTearing.activeState()
+end
