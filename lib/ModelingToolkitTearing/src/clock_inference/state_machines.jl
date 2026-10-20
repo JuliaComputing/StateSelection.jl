@@ -72,13 +72,12 @@ for (s, T) in [(:timeInState, :Real),
     (:ticksInState, :Integer),
     (:entry, :Bool),
     (:activeState, :Bool)]
-    seed = hash(s)
     @eval begin
-        $s(x) = wrap(term($s, x))
+        $s(x) = Symbolics.wrap(term($s, x; type = $T, shape = SU.ShapeVecT()))
         SymbolicUtils.promote_symtype(::typeof($s), ::Type{S}) where {S} = $T
     end
     if s != :activeState
-        @eval $s() = wrap(term($s))
+        @eval $s() = Symbolics.wrap(term($s; type = $T, shape = SU.ShapeVecT()))
     end
 end
 
