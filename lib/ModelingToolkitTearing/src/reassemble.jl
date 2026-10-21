@@ -45,7 +45,7 @@ function substitute_derivatives_algevars!(
                 neweqs[eq] = substitute(neweqs[eq], dd => v_t)
                 # The array equation would still contain `D(x)`, which the scalarized row
                 # no longer does.
-                dirty_array_group!(ts, eq)
+                dirty_array_group!(ts, eq, "dummy derivatives replaced $dd by $v_t in the row")
             end
             fullvars[dv] = v_t
             # If we have:
@@ -59,7 +59,7 @@ function substitute_derivatives_algevars!(
                 dx_t = D(x_t)
                 for eq in 𝑑neighbors(graph, ddx)
                     neweqs[eq] = substitute(neweqs[eq], fullvars[ddx] => dx_t)
-                    dirty_array_group!(ts, eq)
+                    dirty_array_group!(ts, eq, "dummy derivatives replaced $(fullvars[ddx]) by $dx_t in the row")
                 end
                 fullvars[ddx] = dx_t
                 dx = ddx
@@ -504,7 +504,7 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
             _vscc = vscc[vars_mask]
             # Rows solved as part of a linear block are no longer their own array element.
             for ieq in _escc
-                dirty_array_group!(state, ieq)
+                dirty_array_group!(state, ieq, "tearing solved the row as part of an inline linear SCC")
             end
             # `linsol` is the `A \ b` term (runtime path); component `j` is solved
             # for the variable assigned below. The analytical path returns a
@@ -1251,10 +1251,12 @@ function codegen_equation!(eg::EquationGenerator,
             # own first-order derivative and previously solved derivatives do not enter its
             # RHS (they are not substituted in the array equation).
             neweq, subbed = make_differential_equation(var, dx, eq, total_sub; check_sub = true)
-            arr_group = state.array_groups[group]
-            if subbed || !isequal(var, dx) ||
-               !isequal(var, arr_group.lhs_vars[state.row_elem[ieq]])
-                arr_group.dirty = true
+            if subbed
+                dirty_array_group!(state, ieq,
+                    "tearing substituted previously solved variables into the row")
+            elseif !isequal(var, dx) ||
+                   !isequal(var, state.array_groups[group].lhs_vars[state.row_elem[ieq]])
+                dirty_array_group!(state, ieq, "tearing solved the row for $var")
             end
         end
         # We will add `neweq.lhs` to `total_sub`, so any equation involving it won't be
@@ -1281,8 +1283,8 @@ function codegen_equation!(eg::EquationGenerator,
         push!(var_ordering, diff_to_var[iv])
         push!(eq_scc, scc_idx)
     elseif issolvable
-        iszero(group) || (state.array_groups[group].dirty = true)
         var = fullvars[iv]
+        dirty_array_group!(state, ieq, "tearing solved the row for $var")
         neweq = make_solved_equation(var, eq, total_sub; simplify)
         if neweq !== nothing
             # backshift solved equations to calculate the value of the variable at the
@@ -1295,7 +1297,7 @@ function codegen_equation!(eg::EquationGenerator,
             push!(solved_vars, iv)
         end
     else
-        iszero(group) || (state.array_groups[group].dirty = true)
+        dirty_array_group!(state, ieq, "tearing left the row as an algebraic equation")
         neweq = make_algebraic_equation(eq, total_sub)
         # For the same reason as solved equations (they are effectively the same)
         if isdisc
@@ -1465,18 +1467,21 @@ function collapse_array_equations!(state::TearingState, neweqs::Vector{Equation}
         grp = array_groups[g]
         m = length(grp.lhs_vars)
         intact = i + m - 1 <= n
+        bad_elem = 0
         if intact
             for k in 1:m
                 r = i + k - 1
                 if row_group[r] != g || row_elem[r] != k ||
                    !isequal(neweqs[r].lhs, grp.lhs_vars[k])
                     intact = false
+                    bad_elem = k
                     break
                 end
             end
         end
         if !intact
-            grp.dirty = true
+            dirty_array_group!(grp, bad_elem,
+                "the rows were not generated contiguously and in element order")
             push!(out, neweqs[i])
             i += 1
             continue
@@ -1489,6 +1494,51 @@ function collapse_array_equations!(state::TearingState, neweqs::Vector{Equation}
     state.row_group = new_row_group
     state.row_elem = new_row_elem
     return out
+end
+
+"""
+Thrown by `preserve_array_equations = :strict` when an array differential equation is not
+kept as a single equation of the simplified system. `elem` is the element of the unknown
+at which a transformation broke it, or `nothing`.
+"""
+struct ArrayEquationNotPreservedError <: Exception
+    eq::Equation
+    reason::String
+    elem::Union{SymbolicT, Nothing}
+end
+
+function Base.showerror(io::IO, err::ArrayEquationNotPreservedError)
+    print(io, "ArrayEquationNotPreservedError: the array equation\n    ", err.eq,
+        "\nwas scalarized because ", err.reason)
+    err.elem === nothing || print(io, " (element ", err.elem, ")")
+    print(io, ". Pass `preserve_array_equations = true` to allow scalarizing it.")
+end
+
+const UNGROUPED_ARRAY_EQ_REASON = "it is not of the form `D(x[slice]) ~ rhs` or a residual form of it"
+
+"""
+    $(TYPEDSIGNATURES)
+
+Report the array differential equations of `state` that were not preserved by
+[`collapse_array_equations!`](@ref): throw an [`ArrayEquationNotPreservedError`](@ref) if
+`strict`, else warn about equations that were never tracked as a group (see
+`state.ungrouped_array_eqs`). Groups broken by a transformation are only reported if
+`strict`, since scalarizing them is the documented non-strict behaviour.
+"""
+function check_preserved_array_equations(state::TearingState, strict::Bool)
+    for eq in state.ungrouped_array_eqs
+        strict && throw(ArrayEquationNotPreservedError(eq, UNGROUPED_ARRAY_EQ_REASON, nothing))
+        @warn """`preserve_array_equations = true`: the array equation
+            $eq
+        was scalarized because $UNGROUPED_ARRAY_EQ_REASON."""
+    end
+    strict || return
+    for grp in state.array_groups
+        grp.dirty || continue
+        elem = iszero(grp.dirty_elem) ? nothing :
+            only(arguments(grp.lhs_vars[grp.dirty_elem]))
+        throw(ArrayEquationNotPreservedError(grp.eq, grp.dirty_reason, elem))
+    end
 end
 
 """
@@ -1523,7 +1573,7 @@ function update_simplified_system!(
         dummy_sub::Dict{SymbolicT, SymbolicT}, var_sccs::Vector{Vector{Int}},
         extra_unknowns::Vector{SymbolicT}, iv::Union{SymbolicT, Nothing},
         D::Union{Differential, Shift, Nothing}; array_hack = true,
-        preserve_array_equations = false)
+        preserve_array_equations::Union{Bool, Symbol} = false)
     (; fullvars, structure, sys) = state
     (; solvable_graph, var_to_diff, eq_to_diff, graph) = structure
 
@@ -1601,8 +1651,9 @@ function update_simplified_system!(
         sys = MTKBase.with_reversible_transformation(sys, tf)
     end
 
-    if preserve_array_equations && !StateSelection.is_only_discrete(structure)
+    if preserve_array_equations !== false && !StateSelection.is_only_discrete(structure)
         neweqs = collapse_array_equations!(state, neweqs)
+        check_preserved_array_equations(state, preserve_array_equations === :strict)
     else
         # No row of the simplified system stands for an array equation.
         fill!(state.row_group, 0)
@@ -1695,8 +1746,14 @@ $TYPEDFIELDS
     range, in element order. Requires code generation to support array equations. Can also
     be passed as the `preserve_array_equations` keyword argument to the algorithm
     (and hence to `mtkcompile`).
+
+    With `true`, array equations that a transformation must break apart (see
+    [`ArrayEquationGroup`](@ref)) are scalarized, and array differential equations that
+    cannot be tracked as a block at all are scalarized with a warning. With `:strict`, both
+    throw an [`ArrayEquationNotPreservedError`](@ref) naming the equation, the
+    transformation and the element.
     """
-    preserve_array_equations::Bool = false
+    preserve_array_equations::Union{Bool, Symbol} = false
 end
 
 function (alg::DefaultReassembleAlgorithm)(state::TearingState,
@@ -1705,8 +1762,10 @@ function (alg::DefaultReassembleAlgorithm)(state::TearingState,
                                            fully_determined::Bool = true,
                                            allow_symbolic::Bool = false,
                                            allow_parameter::Bool = true,
-                                           preserve_array_equations::Bool = alg.preserve_array_equations,
+                                           preserve_array_equations::Union{Bool, Symbol} = alg.preserve_array_equations,
                                            kw...)
+    preserve_array_equations isa Bool || preserve_array_equations === :strict ||
+        throw(ArgumentError("`preserve_array_equations` must be `true`, `false` or `:strict`, got $(repr(preserve_array_equations))."))
     (; simplify, array_hack, inline_linear_sccs, analytical_linear_scc_limit) = alg
     (; var_eq_matching, full_var_eq_matching, var_sccs) = tearing_result
 

@@ -81,10 +81,35 @@ mutable struct ArrayEquationGroup
     equations.
     """
     dirty::Bool
+    """
+    If `dirty`, a description of the first transformation that broke the block. Reported by
+    `preserve_array_equations = :strict`.
+    """
+    dirty_reason::String
+    """
+    If `dirty`, the element (index into `lhs_vars`) at which the block was first broken, or
+    `0` if the whole block was.
+    """
+    dirty_elem::Int
 end
 
 function ArrayEquationGroup(eq::Equation, lhs_vars::Vector{SymbolicT})
-    return ArrayEquationGroup(eq, lhs_vars, false)
+    return ArrayEquationGroup(eq, lhs_vars, false, "", 0)
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Mark `grp` as broken by `reason` at element `elem` (`0` for the whole block). Only the first
+reason is kept.
+"""
+function dirty_array_group!(grp::ArrayEquationGroup, elem::Int, reason::String)
+    if !grp.dirty
+        grp.dirty = true
+        grp.dirty_reason = reason
+        grp.dirty_elem = elem
+    end
+    return grp
 end
 
 """
@@ -165,6 +190,12 @@ mutable struct TearingState <: StateSelection.TransformationState{System}
     `0` for scalar equations.
     """
     row_elem::Vector{Int}
+    """
+    Array equations containing the derivative of an array unknown (or a slice of one) that
+    could not be tracked as an [`ArrayEquationGroup`](@ref), and are hence always
+    scalarized.
+    """
+    ungrouped_array_eqs::Vector{Equation}
 end
 
 function TearingState(
@@ -180,7 +211,8 @@ function TearingState(
     return TearingState(
         sys, fullvars, structure, extra_eqs, param_derivative_map, no_deriv_params,
         original_eqs, additional_observed, always_present, statemachines, eqs_source, mm,
-        analytical_derivatives, ArrayEquationGroup[], zeros(Int, neqs), zeros(Int, neqs)
+        analytical_derivatives, ArrayEquationGroup[], zeros(Int, neqs), zeros(Int, neqs),
+        Equation[]
     )
 end
 
@@ -212,13 +244,14 @@ end
 """
     $TYPEDSIGNATURES
 
-Mark the array equation that row `ieq` belongs to (if any) as broken, so that its rows are
-emitted as scalar equations.
+Mark the array equation that row `ieq` belongs to (if any) as broken by `reason`, so that
+its rows are emitted as scalar equations.
 """
-function dirty_array_group!(ts::TearingState, ieq::Int)
+function dirty_array_group!(
+        ts::TearingState, ieq::Int, reason::String = "a transformation rewrote the row")
     g = row_group(ts, ieq)
     iszero(g) && return false
-    ts.array_groups[g].dirty = true
+    dirty_array_group!(ts.array_groups[g], ts.row_elem[ieq], reason)
     return true
 end
 
@@ -293,6 +326,7 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
     array_groups = ArrayEquationGroup[]
     row_group = Int[]
     row_elem = Int[]
+    ungrouped_array_eqs = Equation[]
     # flatten array equations
     if defer_scalarization
         # Don't scalarize eagerly — defer scalarization to after clock inference (via
@@ -321,7 +355,8 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
         # atomic) and replicate its source entry.
         eqs = Equation[]
         for (i, eq) in enumerate(equations(sys))
-            nrows = append_equation_rows!(eqs, row_group, row_elem, array_groups, eq, iv)
+            nrows = append_equation_rows!(
+                eqs, row_group, row_elem, array_groups, ungrouped_array_eqs, eq, iv)
             if source_info !== nothing
                 for _ in 1:nrows
                     push!(sources, source_info.eqs_source[i])
@@ -570,7 +605,8 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
         # but be safe) breaks the block.
         for i in findall(!, eqs_to_retain)
             g = row_group[i]
-            iszero(g) || (array_groups[g].dirty = true)
+            iszero(g) || dirty_array_group!(
+                array_groups[g], row_elem[i], "the row was removed as a parameter derivative equation")
         end
     end
     eqs = eqs[eqs_to_retain]
@@ -663,7 +699,7 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
     return TearingState(sys, fullvars, structure, Equation[], param_derivative_map,
                         no_deriv_params, original_eqs, Equation[], falses(length(fullvars)),
                         typeof(sys)[], sources, nothing, Dict{SymbolicT, SymbolicT}(),
-                        array_groups, row_group, row_elem)
+                        array_groups, row_group, row_elem, ungrouped_array_eqs)
 end
 
 """
@@ -683,18 +719,21 @@ function canonicalize_array_equation(eq::Equation, iv::SymbolicT)
     elseif is_array_unknown_derivative(rhs, iv)
         return rhs ~ lhs
     end
-    # Residual forms `resid ~ 0` / `0 ~ resid`, as emitted by finite-difference
-    # discretizations: `resid` is a broadcasted sum/difference with the derivative as one
-    # of its two operands.
-    if is_zero_array(rhs)
-        resid = lhs
-    elseif is_zero_array(lhs)
-        resid = rhs
-    else
-        return nothing
-    end
-    iscall(resid) || return nothing
-    operation(resid) === broadcast || return nothing
+    canon = canonicalize_residual_equation(lhs, rhs, iv)
+    canon === nothing || return canon
+    return canonicalize_residual_equation(rhs, lhs, iv)
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Canonicalize the residual form `resid ~ c`, as emitted by finite-difference discretizations,
+to `D(x[slice]) ~ rhs`. `resid` must be a broadcasted (or broadcast-like, see
+[`is_broadcast_call`](@ref)) sum or difference with the derivative as exactly one of its two
+operands, and `c` must not contain derivatives. Return `nothing` otherwise.
+"""
+function canonicalize_residual_equation(resid::SymbolicT, c::SymbolicT, iv::SymbolicT)
+    is_broadcast_call(resid) || return nothing
     args = arguments(resid)
     length(args) == 3 || return nothing
     op = args[1]
@@ -704,15 +743,40 @@ function canonicalize_array_equation(eq::Equation, iv::SymbolicT)
     isA = is_array_unknown_derivative(A, iv)
     isB = is_array_unknown_derivative(B, iv)
     isA == isB && return nothing
+    dx, f = isA ? (A, B) : (B, A)
+    if is_zero_array(c)
+        if op === (-)
+            # `D(x) - f = 0` or `f - D(x) = 0`
+            return dx ~ f
+        elseif op === (+)
+            # `D(x) + f = 0`
+            return dx ~ unwrap(-Symbolics.wrap(f))
+        end
+        return nothing
+    end
+    SU.query(MTKBase.isdifferential, c) && return nothing
+    f, c = Symbolics.wrap(f), Symbolics.wrap(c)
     if op === (-)
-        # `D(x) - f = 0` or `f - D(x) = 0`
-        return isA ? (A ~ B) : (B ~ A)
+        # `D(x) - f = c` or `f - D(x) = c`
+        return dx ~ unwrap(isA ? f .+ c : f .- c)
     elseif op === (+)
-        # `D(x) + f = 0`
-        f = isA ? B : A
-        return (isA ? A : B) ~ unwrap(-Symbolics.wrap(f))
+        # `D(x) + f = c`
+        return dx ~ unwrap(c .- f)
     end
     return nothing
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Whether `x` is a call to `broadcast`, or to a function that is scalarized like it (such as
+the non-inlined `broadcast` wrappers that discretizers emit).
+"""
+function is_broadcast_call(x::SymbolicT)
+    iscall(x) || return false
+    f = operation(x)
+    return f === broadcast ||
+           SU.scalarization_function(f) === SU.scalarization_function(broadcast)
 end
 
 """
@@ -759,12 +823,14 @@ end
 
 Scalarize `eq` and append the resulting rows to `rows`, extending `row_group` and
 `row_elem` in parallel. If `eq` can be tracked as an [`ArrayEquationGroup`](@ref) (see
-[`canonicalize_array_equation`](@ref)), register it in `groups` and tag its rows. Return
+[`canonicalize_array_equation`](@ref)), register it in `groups` and tag its rows. If it
+cannot, but contains the derivative of an array unknown, append it to `ungrouped`. Return
 the number of rows appended.
 """
 function append_equation_rows!(
         rows::Vector{Equation}, row_group::Vector{Int}, row_elem::Vector{Int},
-        groups::Vector{ArrayEquationGroup}, eq::Equation, @nospecialize(iv::Union{SymbolicT, Nothing})
+        groups::Vector{ArrayEquationGroup}, ungrouped::Vector{Equation}, eq::Equation,
+        @nospecialize(iv::Union{SymbolicT, Nothing})
     )
     scalar_eqs = MTKBase.flatten_equation(eq)
     n = length(scalar_eqs)
@@ -799,6 +865,10 @@ function append_equation_rows!(
             append!(row_elem, 1:n)
             return n
         end
+    end
+    if iv isa SymbolicT && SU.is_array_shape(SU.shape(eq.lhs))
+        is_dx = x -> x isa SymbolicT && is_array_unknown_derivative(x, iv)
+        (SU.query(is_dx, eq.lhs) || SU.query(is_dx, eq.rhs)) && push!(ungrouped, eq)
     end
     append!(row_group, Iterators.repeated(0, n))
     append!(row_elem, Iterators.repeated(0, n))
@@ -1046,9 +1116,11 @@ function scalarize_tearing_state_eqs!(ts::TearingState)
     array_groups = ArrayEquationGroup[]
     row_group = Int[]
     row_elem = Int[]
+    ungrouped_array_eqs = Equation[]
 
     for i in eachindex(arr_eqs)
-        nrows = append_equation_rows!(new_eqs, row_group, row_elem, array_groups, arr_eqs[i], iv)
+        nrows = append_equation_rows!(
+            new_eqs, row_group, row_elem, array_groups, ungrouped_array_eqs, arr_eqs[i], iv)
         scalar_orig_eqs = MTKBase.flatten_equation(arr_orig_eqs[i])
         @assert length(scalar_orig_eqs) == nrows
         append!(new_orig, scalar_orig_eqs)
@@ -1105,6 +1177,7 @@ function scalarize_tearing_state_eqs!(ts::TearingState)
     ts.array_groups = array_groups
     ts.row_group = row_group
     ts.row_elem = row_elem
+    ts.ungrouped_array_eqs = ungrouped_array_eqs
 
     structure = ts.structure
     @set! structure.graph = complete(graph)
@@ -1401,7 +1474,7 @@ function shift_discrete_system(ts::TearingState)
     @set! ts.fullvars = fullvars
     # Array blocks are only tracked for continuous differential equations.
     for g in ts.array_groups
-        g.dirty = true
+        dirty_array_group!(g, 0, "array equations are not tracked in discrete systems")
     end
     return ts
 end

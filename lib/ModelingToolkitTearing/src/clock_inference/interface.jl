@@ -55,7 +55,7 @@ function substitute_sample_time(ci::ClockInference{TearingState}, ts::TearingSta
         else
             subrules[st] = dt
             neweq = substitute(eq, subrules)
-            dirty_array_group!(ts, i)
+            dirty_array_group!(ts, i, "the sample time was substituted into the row")
         end
         eqs[i] = neweq
     end
@@ -77,13 +77,16 @@ function system_subset(ts::TearingState, ieqs::Vector{Int}, iieqs::Vector{Int}, 
     # Array blocks are only tracked once the equations are scalarized (after clock
     # inference), so the subset only carries scalar rows. Any groups that exist (eagerly
     # scalarized state) that are split across partitions are broken.
-    array_groups = map(g -> ArrayEquationGroup(g.eq, g.lhs_vars, g.dirty), ts.array_groups)
+    array_groups = map(ts.array_groups) do g
+        ArrayEquationGroup(g.eq, g.lhs_vars, g.dirty, g.dirty_reason, g.dirty_elem)
+    end
     row_group = ts.row_group[ieqs]
     row_elem = ts.row_elem[ieqs]
     old_counts = count_group_rows(length(array_groups), ts.row_group)
     new_counts = count_group_rows(length(array_groups), row_group)
     for g in eachindex(array_groups)
-        old_counts[g] == new_counts[g] || (array_groups[g].dirty = true)
+        old_counts[g] == new_counts[g] ||
+            dirty_array_group!(array_groups[g], 0, "the rows were split across clock partitions")
     end
     @set! ts.array_groups = array_groups
     @set! ts.row_group = row_group

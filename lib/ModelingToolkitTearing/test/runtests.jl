@@ -723,3 +723,92 @@ end
         @test all(g -> g.dirty, ts.array_groups)
     end
 end
+
+# A `broadcast` behind a call Julia does not inline, as emitted by discretizers.
+@noinline noinline_bc(f, As...) = broadcast(f, As...)
+SU.scalarization_function(::typeof(noinline_bc)) = SU.scalarization_function(broadcast)
+function SU.maketerm(::Type{SU.BasicSymbolic{SU.SymReal}}, ::typeof(noinline_bc), args, metadata; kw...)
+    return SU.maketerm(SU.BasicSymbolic{SU.SymReal}, broadcast, args, metadata)
+end
+noinline_bc_term(args...) = SU.Term{SU.SymReal}(
+    noinline_bc, Any[unwrap.(args)...]; type = SU.symtype(unwrap(args[end])),
+    shape = SU.shape(unwrap(args[end])))
+
+@testset "Unpreserved array equations are reported" begin
+    @testset "broadcast-like residual forms with a nonzero constant side" begin
+        @variables u(t)[1:5]
+        lap = unwrap(u[1:3] .- 2 .* u[2:4] .+ u[3:5])
+        # `noinline_bc(+, -lap, D(u[2:4])) ~ noinline_bc(+, 0, noinline_bc(*, 0, u[2:4]))`
+        zero_rhs = noinline_bc_term(+, 0, noinline_bc_term(*, 0, u[2:4]))
+        resid = noinline_bc_term(+, noinline_bc_term(*, -1, lap), D(u[2:4]))
+        @named sys = System([resid ~ zero_rhs, u[1] ~ 0, u[5] ~ 0], t, collect(u), [])
+        ts = TearingState(sys)
+        grp = only(ts.array_groups)
+        @test isequal(grp.eq.lhs, D(u[2:4]))
+        @test isempty(ts.ungrouped_array_eqs)
+        ssys = mtkcompile(sys; preserve_array_equations = :strict)
+        @test isequal(only(equations(ssys)).lhs, D(u[2:4]))
+        # The canonical RHS agrees with the scalarized rows.
+        vals = Dict(u[i] => Float64(i)^2 for i in 1:5)
+        rhs = Symbolics.value.(substitute(collect(Symbolics.wrap(grp.eq.rhs)), vals))
+        @test rhs ≈ [2.0, 2.0, 2.0]
+        # A constant side with derivatives is not a residual form.
+        resid = noinline_bc_term(-, D(u[2:4]), lap)
+        c = noinline_bc_term(*, 2, D(u[1:3]))
+        @named sys = System([resid ~ c, u[1] ~ 0, u[5] ~ 0], t, collect(u), [])
+        ts = TearingState(sys)
+        @test isempty(ts.array_groups)
+        @test length(ts.ungrouped_array_eqs) == 1
+    end
+
+    @testset "ungrouped array differential equations warn or throw" begin
+        @variables x(t)[1:3]
+        @named sys = System([2 .* D(x) ~ -x], t)
+        @test_logs (:warn, r"was scalarized because it is not of the form") mtkcompile(
+            sys; preserve_array_equations = true)
+        @test_throws MTKTearing.ArrayEquationNotPreservedError mtkcompile(
+            sys; preserve_array_equations = :strict)
+        @test_logs mtkcompile(sys)
+    end
+
+    @testset "`:strict` throws for dirty groups" begin
+        @variables x(t)[1:3] y(t) z(t) T(t)
+        @named sys = System([D(x) ~ -x .+ [0, T, 0], 0 ~ x[2] - y, D(y) ~ -y], t)
+        err = try
+            mtkcompile(sys; preserve_array_equations = :strict)
+            nothing
+        catch e
+            e
+        end
+        @test err isa MTKTearing.ArrayEquationNotPreservedError
+        # Index reduction differentiates the scalar constraint; `D(x[2])` becomes a dummy
+        # derivative and its row is solved for `T`.
+        @test isequal(err.eq.lhs, D(x))
+        @test err.reason == "tearing solved the row for T(t)"
+        @test isequal(err.elem, x[2])
+        msg = sprint(showerror, err)
+        @test occursin("tearing solved the row for T(t) (element (x(t))[2])", msg)
+        # Lenient mode scalarizes silently, as documented.
+        @test_logs mtkcompile(sys; preserve_array_equations = true)
+
+        # Intact groups compile as with `true`.
+        @named sys = System([D(x) ~ -x .+ y, y ~ sum(x), 0 ~ z^3 + z - y], t)
+        ssys = mtkcompile(sys; preserve_array_equations = :strict)
+        @test count(eq -> SU.is_array_shape(SU.shape(eq.lhs)), equations(ssys)) == 1
+        alg = MTKTearing.DefaultReassembleAlgorithm(; preserve_array_equations = :strict)
+        ssys = mtkcompile(sys; reassemble_alg = alg)
+        @test count(eq -> SU.is_array_shape(SU.shape(eq.lhs)), equations(ssys)) == 1
+        @test_throws ArgumentError mtkcompile(sys; preserve_array_equations = :yes)
+    end
+
+    @testset "the first transformation to break a group is recorded" begin
+        @variables x(t)[1:3] y(t)
+        @named sys = System([D(x) ~ -x .+ y, y ~ sum(x)], t)
+        ts = TearingState(sys)
+        r = findfirst(==(3), ts.row_elem)
+        @test MTKTearing.dirty_array_group!(ts, r, "first")
+        @test MTKTearing.dirty_array_group!(ts, findfirst(==(1), ts.row_elem), "second")
+        grp = only(ts.array_groups)
+        @test grp.dirty && grp.dirty_reason == "first" && grp.dirty_elem == 3
+    end
+end

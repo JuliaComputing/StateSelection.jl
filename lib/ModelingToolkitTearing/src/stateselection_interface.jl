@@ -70,7 +70,7 @@ function StateSelection.eq_derivative!(ts::TearingState, ieq::Int; kwargs...)
 
     # Index reduction differentiating an element of an array equation means the block is
     # part of a higher-index structure; emit it scalarized.
-    dirty_array_group!(ts, ieq)
+    dirty_array_group!(ts, ieq, "index reduction differentiated the row (Pantelides `eq_derivative!`)")
     eq_diff = StateSelection.eq_derivative_graph!(s, ieq)
 
     mm = ts.mm
@@ -477,7 +477,7 @@ function StateSelection.rm_eqs_vars!(
     end
     # `eqs_to_rm` was sorted and uniqued in place by `default_rm_eqs_vars!`.
     for ieq in eqs_to_rm
-        dirty_array_group!(state, ieq)
+        dirty_array_group!(state, ieq, "the row was removed as redundant (`rm_eqs_vars!`)")
     end
     deleteat!(state.row_group, eqs_to_rm)
     deleteat!(state.row_elem, eqs_to_rm)
