@@ -712,8 +712,64 @@ function safe_ldiv(A, b)
             shape = SU.promote_shape(safe_ldiv, SU.shape(A), SU.shape(b))
         )
     end
-    return CommonSolve.solve(LinearProblem(A, b)).u
+    return numeric_ldiv!(A, b)
 end
+
+"""
+    $TYPEDSIGNATURES
+
+Solve the numeric linear system emitted for an inlined linear SCC.
+
+`A` and `b` are the scratch buffers built by the `ArrayMaker` in
+[`get_linear_scc_linsol`](@ref), rewritten entry by entry on every call. The `LinearCache`
+is kept in task local storage and reused, so a steady state call neither builds a
+`LinearProblem` nor allocates a factorization.
+
+The cache is task local because the emitted expression is shared by every problem built
+from it, while `A` and `b` are not.
+
+One cache is kept per array type and size, so a solve site can share with another of the
+same shape. The solution is therefore copied back into `b`, which belongs to this solve
+site alone, rather than returning the cache's own buffer.
+"""
+function numeric_ldiv!(A::AbstractMatrix, b::AbstractVector)
+    # the lookup is necessarily type unstable, so the solve goes behind a function barrier
+    return solve_into!(get_inline_linsolve_cache(A, b), A, b)
+end
+
+function solve_into!(cache, A::AbstractMatrix, b::AbstractVector)
+    # Fill the cache's own buffers and assign them back, rather than writing through
+    # `cache.A` in place. The assignment is what runs LinearSolve's invalidation. Under
+    # `ForwardDiff` that matters twice over: a `DualLinearCache` keeps the primal matrix in
+    # a separate array and the partials behind their own validity flag, and an in place
+    # write reaches neither. The next solve then silently uses the previous call's matrix
+    # and partials, so both the values and the derivatives come back wrong.
+    Awork = cache.A
+    copyto!(Awork, A)
+    cache.A = Awork
+    bwork = cache.b
+    copyto!(bwork, b)
+    cache.b = bwork
+    copyto!(b, CommonSolve.solve!(cache).u)
+    return b
+end
+
+function get_inline_linsolve_cache(A::AbstractMatrix, b::AbstractVector)
+    tls = task_local_storage()
+    key = (INLINE_LINSOLVE_CACHE, typeof(A), size(A))
+    cache = get(tls, key, nothing)
+    if cache === nothing
+        # `A` and `b` are views into the diffcache buffers of whichever problem happens
+        # to call first, and the cache keeps what it is handed, so it needs copies it owns.
+        # `copy` rather than `Matrix`/`Vector` so the cache keeps the array type it was
+        # given, which matters for anything living off the CPU.
+        cache = CommonSolve.init(LinearProblem(copy(A), copy(b)))
+        tls[key] = cache
+    end
+    return cache
+end
+
+numeric_ldiv!(A, b) = CommonSolve.solve(LinearProblem(A, b)).u
 
 function SU.promote_symtype(::typeof(safe_ldiv), TA::SU.TypeT, TB::SU.TypeT)
     return Vector{Real}
@@ -729,6 +785,11 @@ function SU.promote_shape(::typeof(safe_ldiv), sha::SU.ShapeT, shb::SU.ShapeT)
 end
 
 const INLINE_LINEAR_SCC_OP = safe_ldiv
+
+"""
+Tag distinguishing this package's entries in task local storage. See [`numeric_ldiv!`](@ref).
+"""
+const INLINE_LINSOLVE_CACHE = :ModelingToolkitTearing_inline_linsolve_cache
 
 """
     $TYPEDSIGNATURES
