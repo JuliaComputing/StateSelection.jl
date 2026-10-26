@@ -158,8 +158,8 @@ condition, or a field destructured out of a record) and then left out of the par
 list.
 """
 function unknown_or_parameter_message(v, v′)
-    origin = isequal(v, v′) ? "`$v`" : "`$v`, which projects from `$v′`,"
-    return """
+    origin = isequal(v, v′) ? lazy"`$v`" : lazy"`$v`, which projects from `$v′`,"
+    return lazy"""
     $origin occurs in the system but is neither an unknown nor a parameter of it.
 
     Declare it in the system, in whichever list it belongs to:
