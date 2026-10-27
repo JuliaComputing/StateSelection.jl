@@ -211,6 +211,16 @@ function (ivc::InferVariableClosure)(var::SymbolicT)
         arrv, isarr = MTKBase.split_indexed_var(var)
         d = get_time_domain(arrv)
     end
+    if d === nothing
+        # A clock is declared on a variable, not copied onto the things projected out of
+        # it, so a projection reads it off the variable it came from - exactly as an array
+        # element reads it off the array just above. Field accesses have to be walked
+        # through as well as indices to get there, which `split_indexed_var` does not do.
+        recv, isprojection = record_declared_root(var)
+        if isprojection
+            d = get_time_domain(recv)
+        end
+    end
     if is_concrete_time_domain(d)::Bool
         push!(hyperedge, ClockVertex.Clock(d))
     elseif d isa InferredTimeDomain
@@ -364,6 +374,27 @@ end
 """
     $TYPEDSIGNATURES
 
+The declared variable `x` projects out of, and whether a field access was peeled to get
+there. Both indices and field accesses are removed, so `h.x[1].y` resolves to `h` - the
+variable metadata such as a clock is declared on, since a projection carries none of its
+own.
+"""
+function record_declared_root(x::SymbolicT)::Tuple{SymbolicT, Bool}
+    @match x begin
+        BSImpl.Term(; f, args) && if f isa Symbolics.SymbolicGetproperty end => begin
+            root, _ = record_declared_root(args[1]::SymbolicT)
+            return root, true
+        end
+        BSImpl.Term(; f, args) && if f === getindex end => begin
+            return record_declared_root(args[1]::SymbolicT)
+        end
+        _ => return x, false
+    end
+end
+
+"""
+    $TYPEDSIGNATURES
+
 The record instance that `x` projects a leaf out of, and whether it is such a projection at
 all. Field accesses are peeled and operators commute, but array indices are kept: separate
 elements of an array of records are separate instances, while the fields of one instance
@@ -413,8 +444,8 @@ function infer_clocks!(ci::ClockInference)
             _ => nothing
         end
     end
-    # The fields of a record share a clock: a struct may not be differentially clocked.
-    # Separate elements of an array of records are separate instances and may differ.
+    # Fields of one record share a clock. Indices are not peeled, so elements of an array
+    # of records are grouped separately, exactly as elements of a plain array are.
     record_group = Dict{SymbolicT, Int}()
     for (i, v) in enumerate(fullvars)
         root, isprojection = record_clock_root(v)
