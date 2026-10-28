@@ -395,16 +395,21 @@ end
 """
     $TYPEDSIGNATURES
 
-The record instance that `x` projects a leaf out of, and whether it is such a projection at
-all. Field accesses are peeled and operators commute, but array indices are kept: separate
-elements of an array of records are separate instances, while the fields of one instance
-are not.
+The record variable that `x` projects a leaf out of, and whether it is such a projection at
+all. Field accesses and array indices are both peeled, and operators commute, so every leaf
+of one record variable resolves to the same root - the fields of a record and the elements
+of an array of records alike.
 """
 function record_clock_root(x::SymbolicT)::Tuple{SymbolicT, Bool}
     @match x begin
         BSImpl.Term(; f, args) && if f isa Symbolics.SymbolicGetproperty end => begin
             root, _ = record_clock_root(args[1]::SymbolicT)
             return root, true
+        end
+        BSImpl.Term(; f, args) && if f === getindex end => begin
+            # An index on its own is not a projection: `u[1]` of a plain array stays its
+            # own root. It only joins a group when a field access sits above or below it.
+            return record_clock_root(args[1]::SymbolicT)
         end
         BSImpl.Term(; f, args) && if f isa SU.Operator && length(args) == 1 end => begin
             root, isprojection = record_clock_root(args[1]::SymbolicT)
@@ -444,8 +449,9 @@ function infer_clocks!(ci::ClockInference)
             _ => nothing
         end
     end
-    # Fields of one record share a clock. Indices are not peeled, so elements of an array
-    # of records are grouped separately, exactly as elements of a plain array are.
+    # Every leaf of one record variable shares a clock: the fields of a record, and the
+    # elements of an array of records, all resolve to the same root. A clock reaching any
+    # one of them therefore reaches the rest, and two that disagree are a conflict.
     record_group = Dict{SymbolicT, Int}()
     for (i, v) in enumerate(fullvars)
         root, isprojection = record_clock_root(v)
