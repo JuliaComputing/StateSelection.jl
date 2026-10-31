@@ -742,8 +742,9 @@ end
 """
     $TYPEDSIGNATURES
 
-Solve `A x = b` by Gaussian elimination with partial pivoting, overwriting `A` with its
-row-permuted upper triangular factor and `b` with `x`, and return `b`.
+Solve `A x = b` by Gaussian elimination with partial pivoting, overwriting `b` with `x`, and
+return `b`. `A` is used as workspace: afterwards its upper triangle holds the upper triangular
+factor of the row-permuted `A`, and its strictly lower triangle is unspecified.
 
 It is written in plain Julia over the element type, so it neither allocates nor keeps any
 state between calls, and dual numbers propagate through it. Pivots are chosen by `abs`, which
