@@ -13,6 +13,7 @@ using Setfield
 using ForwardDiff
 using LinearAlgebra
 import ModelingToolkitBase as MTKBase
+import SymbolicIndexingInterface
 
 @testset "`InferredDiscrete` validation" begin
     k = ShiftIndex()
@@ -202,6 +203,117 @@ end
 
     # and the cache recovers for the next well conditioned solve of the same shape
     @test MTKTearing.numeric_ldiv!(copy(A), [1.0, 2.0]) ≈ expected
+end
+
+@testset "`generic_lu_ldiv!` solves in place with partial pivoting" begin
+    # a zero leading entry needs a row swap; the solution is [1, 2, 3]
+    A = [0.0 2.0 1.0; 1.0 1.0 1.0; 2.0 0.0 3.0]
+    b = [7.0, 6.0, 11.0]
+    u = MTKTearing.generic_lu_ldiv!(copy(A), b)
+    @test u === b
+    @test u ≈ [1.0, 2.0, 3.0]
+    A1, b1 = copy(A), [7.0, 6.0, 11.0]
+    MTKTearing.generic_lu_ldiv!(copy(A), copy(b1))
+    @test @allocated(MTKTearing.generic_lu_ldiv!(A1, b1)) == 0
+
+    # derivative of x(s) = A(s) \ b with A(s) = A + s * E is -A⁻¹ E x
+    E = [1.0 0.0 0.0; 0.0 0.0 1.0; 0.0 1.0 0.0]
+    dx = ForwardDiff.derivative(
+        s -> MTKTearing.generic_lu_ldiv!(A + s * E, [7.0, 6.0, 11.0] .+ 0 * s), 0.0)
+    @test dx ≈ -(A \ (E * [1.0, 2.0, 3.0]))
+
+    # no rank-deficient fallback
+    S = [1.0 2.0; 2.0 4.0]
+    @test !all(isfinite, MTKTearing.generic_lu_ldiv!(copy(S), [1.0, 2.0]))
+end
+
+@testset "Inline linear SCCs with `inline_linear_scc_generic_lu`" begin
+    @variables x(t) = 1.0 y(t) = 1.0 z(t) = 1.0 w(t) = 1.0 q(t) = 1.0
+    reassemble_alg = MTKTearing.DefaultReassembleAlgorithm(;
+        inline_linear_sccs = true, inline_linear_scc_generic_lu = true)
+    @mtkcompile sys = System(
+        [
+            D(x) ~ 2t + 1,
+            (2 + x) * y + x * z + w ~ 4,
+            (4 + x) * y + 3z + 2w ~ 7 + t,
+            2x * y + (3 + x) * z + w ~ 10,
+            D(q) ~ 2w + 3z + y,
+        ],
+        t
+    ) reassemble_alg = reassemble_alg
+
+    blk = only(MTKTearing.inline_linear_systems(sys))
+    @test SU.operation(unwrap(blk.expression)) === MTKTearing.INLINE_LINEAR_SCC_OP
+
+    # the block written out by hand, as the reference for values and derivatives
+    Aref(xv) = [2+xv xv 1; 4+xv 3 2; 2xv 3+xv 1]
+    bref(tv) = [4.0, 7 + tv, 10.0]
+    dAdx = [1.0 1.0 0.0; 1.0 0.0 0.0; 2.0 1.0 0.0]
+    c = [1.0, 3.0, 2.0]
+
+    prob = ODEProblem(sys, [x => 1.5], (0.0, 1.0))
+    f! = prob.f.f.f_iip
+    ix = SymbolicIndexingInterface.variable_index(sys, x)
+    iq = SymbolicIndexingInterface.variable_index(sys, q)
+    u0, p, tv = copy(prob.u0), prob.p, 0.3
+    X = Aref(1.5) \ bref(tv)
+
+    # each check runs in a fresh task, so the task local cache of the default solver
+    # cannot be there unless this solve created it
+    res = fetch(Threads.@spawn begin
+        du = similar(u0)
+        f!(du, u0, p, tv)
+        first_dq = du[iq]
+        f!(du, u0, p, tv)
+        J = ForwardDiff.jacobian((d, u) -> (f!(d, u, p, tv); nothing), similar(u0), u0)
+        dt = ForwardDiff.derivative(
+            s -> (d = similar(u0, typeof(s)); f!(d, u0, p, s); d), tv)
+        (; first_dq, dq = du[iq], J, dt,
+            tls = haskey(task_local_storage(), MTKTearing.INLINE_LINSOLVE_CACHE))
+    end)
+    @test res.first_dq ≈ c' * X
+    @test res.dq ≈ c' * X
+    @test !res.tls
+    @test res.J[iq, ix] ≈ -c' * (Aref(1.5) \ (dAdx * X))
+    @test res.dt[iq] ≈ c' * (Aref(1.5) \ [0.0, 1.0, 0.0])
+end
+
+@testset "`inline_linear_scc_generic_lu` with blocks sharing `A` or `b`" begin
+    @variables x(t) = 1.5 q(t) = 1.0 y(t) z(t) w(t) a(t) c(t) d(t)
+    reassemble_alg = MTKTearing.DefaultReassembleAlgorithm(;
+        inline_linear_sccs = true, inline_linear_scc_generic_lu = true)
+    A(xv) = [2+xv xv 1; 4+xv 3 2; 2xv 3+xv 1]
+    B(xv) = [3+xv xv 1; 1 3+xv 2; 2xv 1 4+xv]
+    first_block = [
+        (2 + x) * y + x * z + w ~ 4,
+        (4 + x) * y + 3z + 2w ~ 7,
+        2x * y + (3 + x) * z + w ~ 10,
+    ]
+    same_A = [
+        (2 + x) * a + x * c + d ~ 5,
+        (4 + x) * a + 3c + 2d ~ 8,
+        2x * a + (3 + x) * c + d ~ 11,
+    ]
+    same_b = [
+        (3 + x) * a + x * c + d ~ 4,
+        a + (3 + x) * c + 2d ~ 7,
+        2x * a + c + (4 + x) * d ~ 10,
+    ]
+    for (second_block, reference) in [
+            (same_A, xv -> (A(xv) \ [4.0, 7, 10], A(xv) \ [5.0, 8, 11])),
+            (same_b, xv -> (A(xv) \ [4.0, 7, 10], B(xv) \ [4.0, 7, 10])),
+        ]
+        eqs = [D(x) ~ 2t + 1; first_block; second_block; D(q) ~ 2w + 3z + y + 5d + 7c + 11a]
+        @named sys = System(eqs, t)
+        sys = mtkcompile(sys; reassemble_alg)
+        @test length(MTKTearing.inline_linear_systems(sys)) == 2
+        prob = ODEProblem(sys, [], (0.0, 1.0))
+        du = similar(prob.u0)
+        prob.f.f.f_iip(du, prob.u0, prob.p, 0.0)
+        X1, X2 = reference(prob.u0[SymbolicIndexingInterface.variable_index(sys, x)])
+        @test du[SymbolicIndexingInterface.variable_index(sys, q)] ≈
+            [1, 3, 2]' * X1 + [11, 7, 5]' * X2
+    end
 end
 
 @testset "Inline linear SCC derivatives stay correct across repeated solves" begin

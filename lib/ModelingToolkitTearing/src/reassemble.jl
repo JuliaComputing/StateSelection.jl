@@ -406,6 +406,7 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
         var_sccs::Vector{Vector{Int}}, extra_eqs_vars::NTuple{2, Vector{Int}},
         iv::Union{SymbolicT, Nothing}, D::Union{Differential, Shift, Nothing};
         simplify::Bool = false, inline_linear_sccs = false, analytical_linear_scc_limit = 2,
+        inline_linear_scc_generic_lu::Bool = false,
         allow_symbolic::Bool = false, allow_parameter::Bool = true)
     (; fullvars, sys, structure) = state
     (; solvable_graph, var_to_diff, eq_to_diff, graph) = structure
@@ -490,7 +491,7 @@ function generate_system_equations!(state::TearingState, neweqs::Vector{Equation
         # algebraic variables.
         linsol_result = nothing
         if !is_disc && inline_linear_sccs
-            linsol_result = get_linear_scc_linsol(state, escc, vscc, neweqs, var_eq_matching, full_var_eq_matching, total_sub, analytical_linear_scc_limit, simplify)
+            linsol_result = get_linear_scc_linsol(state, escc, vscc, neweqs, var_eq_matching, full_var_eq_matching, total_sub, analytical_linear_scc_limit, simplify; generic_lu = inline_linear_scc_generic_lu)
         end
         if linsol_result isa Tuple{SymbolicT, BitVector, BitVector}
             linsol, eqs_mask, vars_mask = linsol_result
@@ -701,6 +702,14 @@ function dump_linear_scc_to_file(fname, A, x)
     return nothing
 end
 
+"""
+    GenericInlineLU()
+
+Selects [`generic_lu_ldiv!`](@ref) for the runtime solves of inlined linear SCCs. See the
+`inline_linear_scc_generic_lu` field of [`DefaultReassembleAlgorithm`](@ref).
+"""
+struct GenericInlineLU end
+
 function safe_ldiv(A, b)
     A = unwrap(A)
     b = unwrap(b)
@@ -713,6 +722,73 @@ function safe_ldiv(A, b)
         )
     end
     return numeric_ldiv!(A, b)
+end
+
+function safe_ldiv(A, b, alg::GenericInlineLU)
+    A = unwrap(A)
+    b = unwrap(b)
+    if A isa SymbolicT || A isa AbstractMatrix{Num} || A isa AbstractMatrix{SymbolicT} ||
+            b isa SymbolicT || b isa AbstractVector{Num} || b isa AbstractVector{SymbolicT}
+        return Symbolics.STerm(
+            safe_ldiv, Symbolics.SArgsT((A, b, SU.Const{VartypeT}(alg)));
+            type = Vector{Real},
+            shape = SU.promote_shape(safe_ldiv, SU.shape(A), SU.shape(b))
+        )
+    end
+    # `A` and `b` can be buffers shared with another inline solve, so neither is overwritten
+    return generic_lu_ldiv!(copy(A), copy(b))
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Solve `A x = b` by Gaussian elimination with partial pivoting, overwriting `A` with its
+row-permuted upper triangular factor and `b` with `x`, and return `b`.
+
+It is written in plain Julia over the element type, so it neither allocates nor keeps any
+state between calls, and dual numbers propagate through it. Pivots are chosen by `abs`, which
+for `ForwardDiff.Dual` compares the primal values.
+
+There is no rank-deficient fallback: a singular `A` produces non-finite entries in the result.
+"""
+function generic_lu_ldiv!(A::AbstractMatrix, b::AbstractVector)
+    Base.require_one_based_indexing(A, b)
+    n = LinearAlgebra.checksquare(A)
+    length(b) == n ||
+        throw(DimensionMismatch("matrix has $n rows but the right hand side has length $(length(b))"))
+    @inbounds for k in 1:n
+        p = k
+        amax = abs(A[k, k])
+        for i in (k + 1):n
+            ai = abs(A[i, k])
+            if ai > amax
+                p = i
+                amax = ai
+            end
+        end
+        if p != k
+            for j in k:n
+                A[k, j], A[p, j] = A[p, j], A[k, j]
+            end
+            b[k], b[p] = b[p], b[k]
+        end
+        akk = A[k, k]
+        for i in (k + 1):n
+            l = A[i, k] / akk
+            for j in (k + 1):n
+                A[i, j] -= l * A[k, j]
+            end
+            b[i] -= l * b[k]
+        end
+    end
+    @inbounds for k in n:-1:1
+        s = b[k]
+        for j in (k + 1):n
+            s -= A[k, j] * b[j]
+        end
+        b[k] = s / A[k, k]
+    end
+    return b
 end
 
 """
@@ -780,6 +856,10 @@ function SU.promote_symtype(::typeof(safe_ldiv), TA::SU.TypeT, TB::SU.TypeT)
     return Vector{Real}
 end
 
+function SU.promote_symtype(::typeof(safe_ldiv), TA::SU.TypeT, TB::SU.TypeT, ::SU.TypeT)
+    return Vector{Real}
+end
+
 function SU.promote_shape(::typeof(safe_ldiv), sha::SU.ShapeT, shb::SU.ShapeT)
     @nospecialize sha shb
     if sha isa SU.Unknown
@@ -787,6 +867,11 @@ function SU.promote_shape(::typeof(safe_ldiv), sha::SU.ShapeT, shb::SU.ShapeT)
     else
         return SU.ShapeVecT((sha[2],))
     end
+end
+
+function SU.promote_shape(::typeof(safe_ldiv), sha::SU.ShapeT, shb::SU.ShapeT, ::SU.ShapeT)
+    @nospecialize sha shb
+    return SU.promote_shape(safe_ldiv, sha, shb)
 end
 
 const INLINE_LINEAR_SCC_OP = safe_ldiv
@@ -818,7 +903,7 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
                                total_sub::MTKBase.ExpandDerivativeDict{SymbolicT, Dict{SymbolicT, SymbolicT}},
                                analytical_linear_scc_limit::Int,
                                simplify::Bool; allow_symbolic::Bool = false,
-                               allow_parameter::Bool = true)
+                               allow_parameter::Bool = true, generic_lu::Bool = false)
     (; fullvars, sys, structure) = state
     (; graph, solvable_graph, var_to_diff) = structure
     diff_to_var = invview(var_to_diff)
@@ -997,7 +1082,8 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
     b = SU.Code.with_allocator(b_allocator, SU.Const{VartypeT}(b))
     state.sys = sys
 
-    return (INLINE_LINEAR_SCC_OP(A, b), eqs_mask, vars_mask)
+    linsol = generic_lu ? INLINE_LINEAR_SCC_OP(A, b, GenericInlineLU()) : INLINE_LINEAR_SCC_OP(A, b)
+    return (linsol, eqs_mask, vars_mask)
 end
 
 function __reduce_linear_system!(A::StateSelection.CLIL.SparseMatrixCLIL{Num, Int}, b::Vector{SymbolicT}, var_eq_matching::StateSelection.VarEqMatchingT, alg_eqs::Vector{Int}, alg_vars::Vector{Int}, eqs_mask::BitVector, vars_mask::BitVector)
@@ -1592,6 +1678,15 @@ $TYPEDFIELDS
     equations which is solved symbolically rather than using `LinearSolve.jl`.
     """
     analytical_linear_scc_limit::Int = 2
+    """
+    If `inline_linear_sccs == true`, whether the runtime solves of inlined linear SCCs use
+    [`generic_lu_ldiv!`](@ref) on copies of `A` and `b` instead of a `LinearSolve.jl`
+    cache kept in task local storage. The generated code then makes no dynamic calls for
+    these solves, which ahead-of-time compilation with a closed world (such as
+    `juliac --trim`) requires. Each solve allocates its copies, and there is no fallback
+    for singular systems.
+    """
+    inline_linear_scc_generic_lu::Bool = false
 end
 
 function (alg::DefaultReassembleAlgorithm)(state::TearingState,
@@ -1600,7 +1695,8 @@ function (alg::DefaultReassembleAlgorithm)(state::TearingState,
                                            fully_determined::Bool = true,
                                            allow_symbolic::Bool = false,
                                            allow_parameter::Bool = true, kw...)
-    (; simplify, array_hack, inline_linear_sccs, analytical_linear_scc_limit) = alg
+    (; simplify, array_hack, inline_linear_sccs, analytical_linear_scc_limit,
+        inline_linear_scc_generic_lu) = alg
     (; var_eq_matching, full_var_eq_matching, var_sccs) = tearing_result
 
     extra_eqs_vars = get_extra_eqs_vars(
@@ -1649,7 +1745,8 @@ function (alg::DefaultReassembleAlgorithm)(state::TearingState,
         inline_blocks = generate_system_equations!(
             state, neweqs, var_eq_matching, full_var_eq_matching,
             var_sccs, extra_eqs_vars, iv, D; simplify, inline_linear_sccs,
-            analytical_linear_scc_limit, allow_symbolic, allow_parameter)
+            analytical_linear_scc_limit, inline_linear_scc_generic_lu,
+            allow_symbolic, allow_parameter)
         state = reorder_vars!(
             state, var_eq_matching, var_sccs, eq_ordering, var_ordering, nelim_eq, nelim_var)
         # var_eq_matching and full_var_eq_matching are now invalidated
@@ -1666,7 +1763,7 @@ function (alg::DefaultReassembleAlgorithm)(state::TearingState,
             inline_blocks = generate_system_equations!(
                 state, neweqs, var_eq_matching, full_var_eq_matching,
                 var_sccs, extra_eqs_vars, iv, D; simplify, inline_linear_sccs,
-                analytical_linear_scc_limit)
+                analytical_linear_scc_limit, inline_linear_scc_generic_lu)
         state = reorder_vars!(
             state, var_eq_matching, var_sccs, eq_ordering, var_ordering, nelim_eq, nelim_var)
         # var_eq_matching and full_var_eq_matching are now invalidated
