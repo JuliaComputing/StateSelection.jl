@@ -165,7 +165,7 @@ function permute(ts::TearingState, oldtonewvar::Vector{Int}, oldtoneweq::Vector{
     sys = ts.sys
     @set! sys.eqs = eqs
     @set! sys.unknowns = fullvars
-    return TearingState(sys, fullvars, structure, Equation[], ts.param_derivative_map, ts.no_deriv_params, original_eqs, ts.additional_observed, always_present, ts.statemachines, eqs_source)
+    return TearingState(sys, fullvars, structure, Equation[], ts.param_derivative_map, ts.no_deriv_params, original_eqs, ts.additional_observed, always_present, ts.statemachines, eqs_source, ts.init_eqs_source, nothing, ts.analytical_derivatives)
 end
 
 """
