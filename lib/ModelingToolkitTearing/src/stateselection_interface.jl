@@ -315,6 +315,22 @@ function _check_allow_symbolic_parameter(
 end
 
 
+"""
+    $TYPEDSIGNATURES
+
+Check whether the coefficient `coeff` (a symbolic or array thereof) evaluates to exactly
+zero at the initial point of `state.sys`, see [`evaluate_at_initial_point`](@ref). An
+array coefficient counts as zero if any of its entries is. Coefficients that cannot be
+evaluated are not zero.
+"""
+function is_zero_at_initial_point(state::TearingState, coeff)
+    if coeff isa AbstractArray
+        return any(Base.Fix1(is_zero_at_initial_point, state), coeff)
+    end
+    val = evaluate_at_initial_point(state, coeff)
+    return val !== nothing && iszero(val)
+end
+
 const _SUPPORTS_NEED_REMAINDER = isdefined(Symbolics, :SUPPORTS_LINEAR_EXPANDER_NEED_REMAINDER)
 
 function StateSelection.find_eq_solvables!(state::TearingState, ieq, to_rm = Int[], coeffs = nothing;
@@ -357,6 +373,11 @@ function StateSelection.find_eq_solvables!(state::TearingState, ieq, to_rm = Int
         if !SU.isconst(a)
             all_int_vars = false
             if !_check_allow_symbolic_parameter(state, a, allow_symbolic, allow_parameter; fullvars_set)
+                continue
+            end
+            # A coefficient that vanishes at the initial point (e.g. `sin(ω*t)` at `t = 0`)
+            # must not be divided by, like an expression in `maybe_zeros`.
+            if !allow_symbolic && is_zero_at_initial_point(state, a)
                 continue
             end
             add_edge!(solvable_graph, ieq, j)

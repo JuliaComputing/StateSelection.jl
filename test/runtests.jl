@@ -72,3 +72,21 @@ include("carpanzano_tearing.jl")
     @test mm2.row_cols == [[2]]
     @test mm2.row_vals == [[1]]
 end
+
+@testset "`numerically_independent_columns`" begin
+    J = [1.0 2.0 0.0; 0.0 0.0 1.0]
+    @test SSel.numerically_independent_columns(J, 1:3) == [1, 3]
+    @test SSel.numerically_independent_columns(J, [2, 1, 3]) == [2, 3]
+    @test SSel.numerically_independent_columns(J, [1, 2]) == [1]
+    # never more columns than rows
+    @test SSel.numerically_independent_columns([1.0 0.0 1.0], 1:3) == [1]
+    # zero columns are skipped
+    @test SSel.numerically_independent_columns([0.0 1.0; 0.0 1.0], 1:2) == [2]
+    # dependence below the tolerance counts as dependence
+    @test SSel.numerically_independent_columns([1.0 1.0 + 1e-12; 1.0 1.0], 1:2) == [1]
+    @test SSel.numerically_independent_columns([1.0 1.0 + 1e-12; 1.0 1.0], 1:2; rtol = 1e-14) == [1, 2]
+    # rows are scaled, so a badly scaled but regular matrix keeps its rank
+    @test SSel.numerically_independent_columns([1e8 1e8; 1.0 2.0], 1:2) == [1, 2]
+    # columns negligible against the largest one are skipped
+    @test SSel.numerically_independent_columns([1.0 1e-12; 1.0 0.0], 1:2) == [1]
+end
