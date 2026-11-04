@@ -527,6 +527,56 @@ end
     @test issetequal(initialization_equations(sys), [x[1]^2 ~ 2, x[2]^2 ~ 2])
 end
 
+@testset "`init_eqs_source` is tracked consistently with initialization equations" begin
+    function Inner(; name)
+        @variables x(t)[1:2] y(t)
+        return System(
+            [D(x) ~ -x, D(y) ~ -y], t, [x, y], []; name,
+            initialization_eqs = [x .^ 2 ~ 2ones(2), y ~ 1.0]
+        )
+    end
+    @named inner = Inner()
+    @variables z(t)
+    @named outer = System(
+        [D(z) ~ -z], t, [z], []; systems = [inner], initialization_eqs = [z ~ inner.y]
+    )
+    flat, src_info = MTKBase.expand_connections(outer, Val(true))
+    @test src_info.init_eqs_source == [[:outer], [:outer, :inner], [:outer, :inner]]
+
+    ts_eager = TearingState(flat, src_info)
+    @test length(ts_eager.init_eqs_source) == length(initialization_equations(ts_eager.sys))
+    @test ts_eager.init_eqs_source == [[:outer], [:outer, :inner], [:outer, :inner], [:outer, :inner]]
+
+    ts_deferred = TearingState(flat, src_info; defer_scalarization = true)
+    # not yet expanded per scalar equation
+    @test ts_deferred.init_eqs_source == src_info.init_eqs_source
+    MTKTearing.scalarize_tearing_state_eqs!(ts_deferred)
+    @test ts_deferred.init_eqs_source == ts_eager.init_eqs_source
+    @test isequal(
+        initialization_equations(ts_deferred.sys), initialization_equations(ts_eager.sys)
+    )
+
+    # Subsetting (as done for clock partitions) keeps sources aligned with init equations
+    ts = TearingState(flat, src_info; defer_scalarization = true)
+    neqs = length(equations(ts))
+    nvars = length(ts.fullvars)
+    sub = MTKTearing.system_subset(ts, collect(1:neqs), [3, 1], collect(1:nvars))
+    @test sub.init_eqs_source == [[:outer, :inner], [:outer]]
+    @test isequal(initialization_equations(sub.sys), initialization_equations(ts.sys)[[3, 1]])
+
+    # Without source information nothing is tracked
+    @test isempty(TearingState(outer).init_eqs_source)
+    # Old-style source information (no init sources) is accepted
+    old_info = MTKBase.EquationSourceInformation(src_info.eqs_source, src_info.is_connection_equation)
+    @test isempty(TearingState(flat, old_info).init_eqs_source)
+
+    # End to end through `mtkcompile`
+    sys = mtkcompile(outer)
+    srcs = MTKBase.get_tearing_state(sys).init_eqs_source
+    @test length(srcs) == length(initialization_equations(sys)) == 4
+    @test sort(srcs) == sort(ts_eager.init_eqs_source)
+end
+
 @testset "`TearingState` does not drop initial conditions for partially present array variables" begin
     # This tends to happen in initialization systems, especially after `full_equations` init since
     # only part of the array is in the unknowns of the DAE.

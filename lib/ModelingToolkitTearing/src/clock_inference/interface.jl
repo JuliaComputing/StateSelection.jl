@@ -73,6 +73,9 @@ function system_subset(ts::TearingState, ieqs::Vector{Int}, iieqs::Vector{Int}, 
     if !isempty(ts.eqs_source)
         @set! ts.eqs_source = ts.eqs_source[ieqs]
     end
+    if !isempty(ts.init_eqs_source)
+        @set! ts.init_eqs_source = ts.init_eqs_source[iieqs]
+    end
     if all(eq -> eq.rhs isa StateMachineOperator, MTKBase.get_eqs(ts.sys))
         names = Symbol[]
         for eq in MTKBase.get_eqs(ts.sys)

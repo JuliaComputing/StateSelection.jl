@@ -100,6 +100,12 @@ mutable struct TearingState <: StateSelection.TransformationState{System}
     """
     eqs_source::Vector{Vector{Symbol}}
     """
+    Source information for each initialization equation of `sys`, with the same
+    convention as `eqs_source`. If this field is empty, either the system has no
+    initialization equations or source information is unknown.
+    """
+    init_eqs_source::Vector{Vector{Symbol}}
+    """
     A `SparseMatrixCLIL` identifying equations which are integer-coefficient linear
     combinations of variables.
     """
@@ -185,6 +191,13 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
     MTKBase.check_no_parameter_equations(sys)
     iv = MTKBase.get_iv(sys)
     sources = Vector{Vector{Symbol}}()
+    init_sources = Vector{Vector{Symbol}}()
+    if source_info !== nothing && !isempty(source_info.init_eqs_source)
+        @assert length(initialization_equations(sys)) == length(source_info.init_eqs_source) """
+        Mismatch between initialization equation source information provided to \
+        `TearingState` and the structure of the system.
+        """
+    end
     # flatten array equations
     if defer_scalarization
         # Don't scalarize eagerly — defer scalarization to after clock inference (via
@@ -196,6 +209,7 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
             of the system.
             """
             sources = Vector{Vector{Symbol}}(source_info.eqs_source)
+            init_sources = Vector{Vector{Symbol}}(source_info.init_eqs_source)
         end
         eqs = Vector{Equation}(equations(sys))
     else
@@ -209,6 +223,13 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
                 scal_eq = MTKBase.flatten_equation(eq)
                 for _ in scal_eq
                     push!(sources, src)
+                end
+            end
+        end
+        if source_info !== nothing && !isempty(source_info.init_eqs_source)
+            for (eq, src) in zip(initialization_equations(sys), source_info.init_eqs_source)
+                for _ in MTKBase.flatten_equation(eq)
+                    push!(init_sources, src)
                 end
             end
         end
@@ -535,7 +556,8 @@ function TearingState(sys::System, source_info::Union{Nothing, MTKBase.EquationS
                                 canonical_ranks, false)
     return TearingState(sys, fullvars, structure, Equation[], param_derivative_map,
                         no_deriv_params, original_eqs, Equation[], falses(length(fullvars)),
-                        typeof(sys)[], sources, nothing, Dict{SymbolicT, SymbolicT}())
+                        typeof(sys)[], sources, init_sources, nothing,
+                        Dict{SymbolicT, SymbolicT}())
 end
 
 """
@@ -821,12 +843,24 @@ function scalarize_tearing_state_eqs!(ts::TearingState)
     graph = build_incidence_graph(length(fullvars), symbolic_incidence, var2idx)
 
     sys = ts.sys
-    init_eqs = MTKBase.flatten_equations(initialization_equations(sys))
+    arr_init_eqs = initialization_equations(sys)
+    init_eqs_source = ts.init_eqs_source
+    new_init_sources = Vector{Vector{Symbol}}()
+    if !isempty(init_eqs_source)
+        sizehint!(new_init_sources, length(init_eqs_source))
+        for (eq, src) in zip(arr_init_eqs, init_eqs_source)
+            for _ in MTKBase.flatten_equation(eq)
+                push!(new_init_sources, src)
+            end
+        end
+    end
+    init_eqs = MTKBase.flatten_equations(arr_init_eqs)
     @set! sys.initialization_eqs = init_eqs
     @set! sys.eqs = new_eqs
     ts.sys = sys
     ts.original_eqs = new_orig
     ts.eqs_source = new_sources
+    ts.init_eqs_source = new_init_sources
 
     structure = ts.structure
     @set! structure.graph = complete(graph)
