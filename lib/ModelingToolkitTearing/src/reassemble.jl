@@ -729,8 +729,8 @@ The cache is task local because the emitted expression is shared by every proble
 from it, while `A` and `b` are not.
 
 One cache is kept per array type and size, so a solve site can share with another of the
-same shape. The solution is therefore copied back into `b`, which belongs to this solve
-site alone, rather than returning the cache's own buffer.
+same shape. The solution is therefore returned in a new array rather than in the cache's
+own buffer or in `b`, which codegen shares between solve sites with the same `b`.
 """
 function numeric_ldiv!(A::AbstractMatrix, b::AbstractVector)
     # the lookup is necessarily type unstable, so the solve goes behind a function barrier
@@ -750,8 +750,9 @@ function solve_into!(cache, A::AbstractMatrix, b::AbstractVector)
     bwork = cache.b
     copyto!(bwork, b)
     cache.b = bwork
-    copyto!(b, CommonSolve.solve!(cache).u)
-    return b
+    x = similar(b)
+    copyto!(x, CommonSolve.solve!(cache).u)
+    return x
 end
 
 function get_inline_linsolve_cache(A::AbstractMatrix, b::AbstractVector)
