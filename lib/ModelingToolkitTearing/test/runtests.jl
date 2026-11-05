@@ -204,6 +204,18 @@ end
     @test MTKTearing.numeric_ldiv!(copy(A), [1.0, 2.0]) ≈ expected
 end
 
+@testset "`numeric_ldiv!` makes no dynamic calls" begin
+    # calls left in typed code, other than to builtins, are the ones that dispatch at runtime
+    dynamic_calls(types) = count(only(code_typed(MTKTearing.numeric_ldiv!, types)).first.code) do s
+        Meta.isexpr(s, :call) || return false
+        f = s.args[1]
+        return !((f isa GlobalRef ? getglobal(f.mod, f.name) : f) isa Core.Builtin)
+    end
+    for T in (Float64, ForwardDiff.Dual{Nothing, Float64, 1})
+        @test dynamic_calls((Matrix{T}, Vector{T})) == 0
+    end
+end
+
 @testset "Inline linear SCC derivatives stay correct across repeated solves" begin
     @variables x(t) = 1.0 y(t) = 1.0 z(t) = 1.0 w(t) = 1.0 q(t) = 1.0
     reassemble_alg = MTKTearing.DefaultReassembleAlgorithm(; inline_linear_sccs = true)
