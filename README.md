@@ -74,3 +74,11 @@ the choice of algebraic states greatly affects the ease and stability of the res
 
 The code in this package can be traced back to
 JuliaComputing/StructuralTransformations.jl, which provided a port of the structural transformation core from [Modia](https://github.com/ModiaSim/Modia.jl) to MTK's data structures. This package was subsequently integrated into MTK, with a number of intervening rewrites, simplifications and cleanups (both in code and understanding), before be-ing re-extracted to become this package.
+
+## License
+
+StateSelection.jl is licensed under the [GNU Affero General Public License v3.0](LICENSE).
+Code written before the repository was relicensed on 2025-12-01, and code derived from
+ModelingToolkit.jl and Modia.jl, is also available under the [MIT License](LICENSE-MIT).
+Contributions from external contributors are licensed under the
+[Apache License, Version 2.0](LICENSE-APACHE). See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
