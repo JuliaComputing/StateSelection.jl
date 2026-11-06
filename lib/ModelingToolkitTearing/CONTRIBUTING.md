@@ -64,6 +64,10 @@ A commit that contains work by anyone who is not a JuliaHub contributor uses
 `License: Apache-2.0` and no `Copyright:` trailer. Trailers can be added with
 `git commit --trailer 'License: Apache-2.0'`.
 
+CI checks every commit in a pull request for these trailers. To run the same
+check locally, use `.github/scripts/check-license-trailers.sh origin/main..HEAD`
+from the repository root.
+
 ### Meaning of the `Copyright: JuliaHub, Inc.` trailer
 
 By adding `Copyright: JuliaHub, Inc.` to a commit, you confirm that JuliaHub,

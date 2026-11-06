@@ -62,6 +62,10 @@ outside JuliaHub. Choose the trailers based on the human authors only.
   git log -1 --format='%(trailers:key=License)%(trailers:key=Copyright)'
   ```
 
+- Before telling the user the work is ready to push, run
+  `.github/scripts/check-license-trailers.sh origin/main..HEAD` and fix any
+  commits it reports.
+
 ### Existing commits
 
 - When amending, rebasing or squashing, keep the trailers. When squashing
