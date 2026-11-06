@@ -77,7 +77,7 @@ JuliaComputing/StructuralTransformations.jl, which provided a port of the struct
 
 ## License
 
-StateSelection.jl is licensed under the [GNU Affero General Public License v3.0](LICENSE).
+StateSelection.jl is licensed under the [GNU Affero General Public License v3.0 only](LICENSE).
 Code written before the repository was relicensed on 2025-12-01, and code taken from
 ModelingToolkit.jl and Modia.jl in the form it had in those projects, is also available
 under the [MIT License](LICENSE-MIT); changes made here on or after that date are not.
