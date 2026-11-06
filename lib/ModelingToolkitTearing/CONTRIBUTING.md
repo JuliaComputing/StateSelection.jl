@@ -8,9 +8,10 @@ repository, and the same contribution policy applies.
 
 ModelingToolkitTearing.jl is distributed under the GNU Affero General Public
 License v3.0 (see [LICENSE](LICENSE)). Code written before the repository was
-relicensed under the AGPL-3.0 on 2025-12-01, and code derived from
-ModelingToolkit.jl and Modia.jl, is also available under the MIT License (see
-[LICENSE-MIT](LICENSE-MIT)).
+relicensed under the AGPL-3.0 on 2025-12-01, and code taken from
+ModelingToolkit.jl and Modia.jl in the form it had in those projects, is also
+available under the MIT License (see [LICENSE-MIT](LICENSE-MIT)). Changes made
+here on or after that date are not.
 
 Contributions are licensed as follows:
 
