@@ -63,6 +63,10 @@ A commit that contains work by anyone who is not a JuliaHub contributor uses
 CI checks every commit in a pull request for these trailers. To run the same
 check locally, use `.github/scripts/check-license-trailers.sh origin/main..HEAD`
 from the repository root.
+Commits authored by automated dependency bots (CompatHelper, Dependabot,
+Renovate and similar) are exempt, since they have no human author. Commits made
+with AI coding agents are not exempt: the human directing the agent adds the
+trailers.
 
 ### Meaning of the `Copyright: JuliaHub, Inc.` trailer
 
