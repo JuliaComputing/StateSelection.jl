@@ -34,6 +34,88 @@ end
     @test isempty(observables(sys))
 end
 
+# https://github.com/JuliaComputing/StateSelection.jl/issues/166
+@testset "`maybe_zeros` is respected inside divisions" begin
+    @parameters p q r s
+    qf = MTKTearing.MaybeZeroQueryFn(Set{Symbolics.SymbolicT}(unwrap.([p, q])))
+    maybe_zero(ex) = MTKTearing.query_maybe_zeros(qf, unwrap(ex))
+    # numerator can be zero
+    @test maybe_zero(p / r)
+    @test maybe_zero((p * r) / s)
+    @test maybe_zero((p * r + q * s) / (r * s + 1))
+    @test maybe_zero((p * r + q) / (r * s + 1))
+    @test maybe_zero(r * ((p + q) / s))
+    @test maybe_zero(((p * r + q) / s)^2)
+    # denominator can be zero, so the quotient is not finite
+    @test maybe_zero(r / p)
+    @test maybe_zero(r / (p * s + q))
+    # neither can be zero
+    @test !maybe_zero(r / s)
+    @test !maybe_zero((p * r + s) / (q + 1))
+    @test !maybe_zero((p + 1) / (q * r + s))
+
+    @variables x(t) y(t)
+    @mtkcompile sys = System([D(x) ~ y, (p * r + q) / s * y ~ x], t)
+    @test issetequal(unknowns(sys), [x])
+    @test issetequal(observables(sys), [y])
+    @mtkcompile sys = System([D(x) ~ y, (p * r + q) / s * y ~ x], t;
+        maybe_zeros = Symbolics.SymbolicT[p, q])
+    @test issetequal(unknowns(sys), [x, y])
+    @test isempty(observables(sys))
+
+    # Trim a rigid body by initialisation: the moments are unknown parameters, and
+    # `D(w) ~ 0` is solved for them through the explicit inverse inertia adj(J) / det(J).
+    # With only `Ixz` non-zero, entries such as (Ixy * Iyz + Ixz * Iyy) / det(J) are zero, so the
+    # initialisation system must not divide by them.
+    @parameters Ixx Iyy Izz Ixy Ixz Iyz M[1:3]
+    @variables w(t)[1:3]
+    J = [Ixx -Ixy -Ixz; -Ixy Iyy -Iyz; -Ixz -Iyz Izz]
+    a, b, c, d, e, f, g, h, i = J[1, 1], J[1, 2], J[1, 3], J[2, 1], J[2, 2], J[2, 3], J[3, 1], J[3, 2], J[3, 3]
+    A, B, C = e * i - f * h, f * g - d * i, d * h - e * g
+    adj = [A (c * h - b * i) (b * f - c * e)
+           B (a * i - c * g) (c * d - a * f)
+           C (b * g - a * h) (a * e - b * d)]
+    ws = collect(w)
+    rhs = adj * (collect(M) - cross(ws, J * ws)) ./ (a * A + b * B + c * C)
+    @mtkcompile sys = System(D.(ws) .~ rhs, t; maybe_zeros = Symbolics.SymbolicT[Ixy, Ixz, Iyz])
+    prob = ODEProblem(sys,
+        [sys.w => [0.1, 0.0, 0.0], sys.Ixx => 3.4, sys.Iyy => 8.2, sys.Izz => 11.4,
+            sys.Ixy => 0.0, sys.Ixz => 0.2, sys.Iyz => 0.0, sys.M => missing],
+        (0.0, 1.0); guesses = [sys.M => zeros(3)], initialization_eqs = D.(ws) .~ 0)
+    initprob = prob.f.initialization_data.initializeprob
+    subprobs = initprob isa ModelingToolkit.SciMLBase.SCCNonlinearProblem ? initprob.probs : [initprob]
+    linprobs = filter(Base.Fix2(isa, ModelingToolkit.SciMLBase.LinearProblem), subprobs)
+    @test !isempty(linprobs)
+    for lp in linprobs
+        @test all(isfinite, lp.A)
+        @test all(isfinite, lp.b)
+    end
+end
+
+# https://github.com/SciML/ModelingToolkit.jl/issues/5279
+@testset "Inline linear SCC does not pivot on a quotient with a maybe-zero numerator" begin
+    # Euler equations J * z ~ -w x J w with only `I31` non-zero. `I21` and `I32` are
+    # discovered as maybe-zero from their defaults. Eliminating `I31` leaves the entry
+    # I21 - I11 * I32 / I31, which is zero, so the SCC must not be solved analytically.
+    @parameters I11 = 3.4 I22 = 8.2 I33 = 11.4 I21 = 0.0 I31 = -0.2 I32 = 0.0
+    @variables w(t)[1:3] = [0.1, 0.2, 0.3] z(t)[1:3]
+    J = [I11 I21 I31; I21 I22 I32; I31 I32 I33]
+    ws, zs = collect(w), collect(z)
+    eqs = [D.(ws) .~ zs
+           zeros(3) ~ J * zs + cross(ws, J * ws)]
+    @named sys = System(eqs, t)
+    reassemble_alg = MTKTearing.DefaultReassembleAlgorithm(; inline_linear_sccs = true)
+    sys = mtkcompile(sys; reassemble_alg)
+    prob = ODEProblem(sys, [], (0.0, 1.0))
+    Jv = [3.4 0.0 -0.2; 0.0 8.2 0.0; -0.2 0.0 11.4]
+    wv = [0.1, 0.2, 0.3]
+    expected = Jv \ -cross(wv, Jv * wv)
+    du = prob.f(prob.u0, prob.p, 0.0)
+    @test all(isfinite, du)
+    perm = [findfirst(isequal(unwrap(w[i])), unknowns(sys)) for i in 1:3]
+    @test du[perm] ≈ expected rtol = 1e-10
+end
+
 # https://github.com/SciML/ModelingToolkit.jl/issues/4282
 @testset "`find_eq_solvables!` symbolically removes singular incidences" begin
     @variables x(t) y(t)

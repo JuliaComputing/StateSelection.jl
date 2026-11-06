@@ -194,6 +194,9 @@ end
 function maybe_zeros_descend(ex::SymbolicT)
     @match ex begin
         BSImpl.AddMul(; variant) => return variant === SU.AddMulVariant.MUL
+        # A quotient is zero if its numerator is, and is not finite if its denominator is.
+        # Both are unsafe to divide by, so look inside both.
+        BSImpl.Div(; num) => return true
         BSImpl.Term(; f) => return f === (^) || f === sin || f === adjoint || f === LinearAlgebra.dot || f === getindex || f === ifelse || f === max || f === min
         _ => return false
     end
@@ -219,7 +222,8 @@ end
     $METHODLIST
 
 Check if `ex` contains any expressions in `qf.maybe_zeros` as factors, or in places
-that could cause `ex` to be zero.
+that could cause `ex` to be zero. The numerator and denominator of a quotient are both
+checked, since a zero denominator makes `ex` non-finite.
 """
 function query_maybe_zeros(qf::MaybeZeroQueryFn, ex::SymbolicT)
     return SU.query(qf, ex; recurse = maybe_zeros_descend)
