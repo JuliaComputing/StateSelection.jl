@@ -1,9 +1,15 @@
 MIT License
 
-This file covers code in this repository that was written before the repository
-was relicensed under the AGPL-3.0 on 2025-12-01, and code derived from
-ModelingToolkit.jl and Modia.jl (including code moved here from ModelingToolkit.jl
-after that date). That code remains available under the following terms.
+This file covers the following code in this repository, which remains available
+under the terms below:
+
+- code written before the repository was relicensed under the AGPL-3.0 on
+  2025-12-01; and
+- code taken from ModelingToolkit.jl or Modia.jl, in the form it had in those
+  projects (including code copied from ModelingToolkit.jl after that date).
+
+Changes made in this repository on or after 2025-12-01 are not covered by this
+file; see LICENSE and CONTRIBUTING.md.
 
 Copyright (c) 2024-2025 JuliaHub, Inc. and other contributors
 Copyright (c) 2018-2024 Yingbo Ma, Christopher Rackauckas, Julia Computing, and
