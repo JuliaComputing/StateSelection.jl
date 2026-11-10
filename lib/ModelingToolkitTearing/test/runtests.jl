@@ -272,6 +272,8 @@ end
     @test du[1] ≈ refdu[1]
 end
 
+include("enzyme.jl")
+
 @testset "`inline_linear_systems` diagnostic" begin
     @variables x(t) y(t) z(t) w(t) q(t)
     ralg = MTKTearing.DefaultReassembleAlgorithm(; inline_linear_sccs = true)
