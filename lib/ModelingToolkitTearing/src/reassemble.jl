@@ -774,6 +774,23 @@ end
     return cache
 end
 
+"""
+    $TYPEDSIGNATURES
+
+Whether the last [`numeric_ldiv!`](@ref) of this array type and size on the current task
+found `A` singular, so that it returned the minimum norm least squares solution instead of
+`A \\ b`.
+
+This reads the flag LinearSolve's default algorithm sets when the LU factorization fails
+and it redoes the solve with a column pivoted QR. The flag is internal to LinearSolve, so
+the answer is `false` whenever it is not there to read.
+"""
+function inline_linsolve_fell_back(A::AbstractMatrix, b::AbstractVector)
+    cacheval = get_inline_linsolve_cache(A, b).cacheval
+    hasfield(typeof(cacheval), :fell_back_to_qr) || return false
+    return getfield(cacheval, :fell_back_to_qr)::Bool
+end
+
 numeric_ldiv!(A, b) = CommonSolve.solve(LinearProblem(A, b)).u
 
 function SU.promote_symtype(::typeof(safe_ldiv), TA::SU.TypeT, TB::SU.TypeT)

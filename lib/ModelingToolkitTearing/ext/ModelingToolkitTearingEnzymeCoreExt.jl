@@ -22,7 +22,8 @@ using LinearAlgebra: mul!
 #
 # The formulas assume `A` is invertible. `numeric_ldiv!` also accepts a singular `A` and
 # returns the minimum norm least squares solution, whose derivative has a null space term
-# these rules leave out. `ForwardDiff` through the same solve leaves it out too.
+# these rules leave out. `ForwardDiff` through the same solve leaves it out too. The rules
+# warn, once, when a solve they differentiate turns out to be singular.
 
 const NumericLdiv = Const{typeof(MTKTearing.numeric_ldiv!)}
 const RealMatrix = Annotation{<:AbstractMatrix{<:Real}}
@@ -43,12 +44,24 @@ function check_activity(A, b, W)
     return nothing
 end
 
+function solve_and_warn_if_singular!(A, b)
+    MTKTearing.numeric_ldiv!(A, b)
+    if MTKTearing.inline_linsolve_fell_back(A, b)
+        @warn """
+        Differentiating an inline linear solve with a singular matrix. The solve returned \
+        the minimum norm least squares solution, and the derivative is computed as if the \
+        matrix were invertible, so it leaves out how that solution moves within the null \
+        space of the matrix.""" size = size(A) maxlog = 1
+    end
+    return b
+end
+
 function EnzymeRules.forward(
         config::EnzymeRules.FwdConfig, ::NumericLdiv, RT::Type, A::RealMatrix, b::RealVector
     )
     W = Val(EnzymeRules.width(config))
     check_activity(A, b, W)
-    MTKTearing.numeric_ldiv!(A.val, b.val)
+    solve_and_warn_if_singular!(A.val, b.val)
     if !isconstant(b, W)
         for (i, db) in enumerate(shadows(b, W))
             isconstant(A, W) || mul!(db, shadows(A, W)[i], b.val, -1, 1)
@@ -78,7 +91,7 @@ function EnzymeRules.augmented_primal(
     # `A` is a scratch buffer that the caller refills before the reverse pass runs, so the
     # tape needs its own copy. It is stored transposed, ready for the adjoint solve.
     tape = isconstant(b, W) ? nothing : (permutedims(A.val), similar(b.val))
-    MTKTearing.numeric_ldiv!(A.val, b.val)
+    solve_and_warn_if_singular!(A.val, b.val)
     tape === nothing || copyto!(tape[2], b.val)
     primal = EnzymeRules.needs_primal(config) ? b.val : nothing
     shadow = if !EnzymeRules.needs_shadow(config)

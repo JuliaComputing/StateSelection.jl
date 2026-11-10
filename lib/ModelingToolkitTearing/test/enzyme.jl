@@ -82,6 +82,33 @@ end
     end
 end
 
+function enzyme_test_singular(t)
+    A = [1.0 t; 2.0 2t]
+    b = [1.0, 2.0]
+    MTKTearing.numeric_ldiv!(A, b)
+    return b[1]
+end
+
+@testset "A singular solve is detected and warned about" begin
+    S = [1.0 2.0; 2.0 4.0]
+    R = [2.0 1.0; 1.0 3.0]
+    MTKTearing.numeric_ldiv!(copy(S), [1.0, 2.0])
+    @test MTKTearing.inline_linsolve_fell_back(S, [1.0, 2.0])
+    MTKTearing.numeric_ldiv!(copy(R), [1.0, 2.0])
+    @test !MTKTearing.inline_linsolve_fell_back(R, [1.0, 2.0])
+
+    # rank 1 for every `t`, with the minimum norm solution `[1, t] / (1 + t^2)`
+    @test_logs (:warn, r"singular matrix") Enzyme.autodiff(
+        Enzyme.Forward, enzyme_test_singular, Duplicated(0.5, 1.0)
+    )
+    @test_logs (:warn, r"singular matrix") Enzyme.autodiff(
+        Enzyme.Reverse, enzyme_test_singular, Active, Active(0.5)
+    )
+    @test_logs min_level = Base.CoreLogging.Warn Enzyme.gradient(
+        Enzyme.Reverse, enzyme_test_loss, [0.9, 1.6]
+    )
+end
+
 @testset "Enzyme through the right-hand side of inline linear SCCs" begin
     @variables x(t) = 1.0 q(t) = 1.0
     @variables y(t) = 1.0 z(t) = 1.0 w(t) = 1.0
