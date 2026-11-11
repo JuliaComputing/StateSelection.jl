@@ -65,7 +65,9 @@ function EnzymeRules.forward(
     if !isconstant(b, W)
         for (i, db) in enumerate(shadows(b, W))
             isconstant(A, W) || mul!(db, shadows(A, W)[i], b.val, -1, 1)
-            MTKTearing.numeric_ldiv!(A.val, db)
+            # nothing else is solved between the primal and its tangents, so they share
+            # its factorization
+            MTKTearing.numeric_ldiv_again!(A.val, db)
         end
     end
     primal = EnzymeRules.needs_primal(config)
@@ -101,9 +103,7 @@ function EnzymeRules.augmented_primal(
     else
         b.dval
     end
-    # called through a type unstable site, `RT` can be wider than what is returned here, so
-    # the return is built with the type Enzyme expects instead of the inferred one
-    return EnzymeRules.augmented_rule_return_type(config, RT, tape)(primal, shadow, tape)
+    return EnzymeRules.AugmentedReturn(primal, shadow, tape)
 end
 
 function EnzymeRules.reverse(
@@ -115,8 +115,10 @@ function EnzymeRules.reverse(
     W = Val(EnzymeRules.width(config))
     for (i, db) in enumerate(shadows(b, W))
         # `b` was overwritten, so its incoming adjoint is exactly λ, and the shadow that
-        # holds x̄ is the one that has to end up holding it
-        MTKTearing.numeric_ldiv!(At, db)
+        # holds x̄ is the one that has to end up holding it. The cache has seen other
+        # solves since the primal, so the first of a batch factorizes `At` and the rest
+        # reuse that.
+        i == 1 ? MTKTearing.numeric_ldiv!(At, db) : MTKTearing.numeric_ldiv_again!(At, db)
         isconstant(A, W) || mul!(shadows(A, W)[i], db, transpose(x), -1, 1)
     end
     return (nothing, nothing)

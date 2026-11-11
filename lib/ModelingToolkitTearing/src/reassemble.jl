@@ -754,6 +754,28 @@ function solve_into!(cache, A::AbstractMatrix, b::AbstractVector)
     return b
 end
 
+"""
+    $TYPEDSIGNATURES
+
+Solve for another right-hand side `b` with the matrix of the last [`numeric_ldiv!`](@ref),
+reusing its factorization. `b` is overwritten with the solution.
+
+`A` only identifies the cache: its entries are not read. The matrix solved with is whatever
+the last solve of this array type and size on the current task left in the cache, so
+nothing else of that shape may be solved between the `numeric_ldiv!` and this call.
+"""
+function numeric_ldiv_again!(A::AbstractMatrix, b::AbstractVector)
+    return solve_again_into!(get_inline_linsolve_cache(A, b), b)
+end
+
+function solve_again_into!(cache, b::AbstractVector)
+    bwork = cache.b
+    copyto!(bwork, b)
+    cache.b = bwork
+    copyto!(b, CommonSolve.solve!(cache).u)
+    return b
+end
+
 function get_inline_linsolve_cache(A::AbstractMatrix, b::AbstractVector)
     # one typed `Dict` under a `Symbol` key, since a tuple key into task local storage
     # (an `IdDict{Any, Any}`) would be boxed on every call

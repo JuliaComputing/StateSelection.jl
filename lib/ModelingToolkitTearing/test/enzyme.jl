@@ -80,6 +80,14 @@ end
         )
         @test db ≈ A \ seed
     end
+
+    # the solution of an active `A` cannot be written into a `b` that has no shadow
+    @testset "active `A`, constant `b`: $name" for (name, mode) in ENZYME_MODES
+        @test_throws ArgumentError Enzyme.autodiff(
+            mode, MTKTearing.numeric_ldiv!, Const, Duplicated(copy(A), zeros(3, 3)),
+            Const(copy(b))
+        )
+    end
 end
 
 function enzyme_test_singular(t)

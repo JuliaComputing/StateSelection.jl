@@ -202,6 +202,15 @@ end
 
     # and the cache recovers for the next well conditioned solve of the same shape
     @test MTKTearing.numeric_ldiv!(copy(A), [1.0, 2.0]) ≈ expected
+
+    # another right-hand side for the same matrix reuses the factorization, in place
+    c = [3.0, -1.0]
+    @test MTKTearing.numeric_ldiv_again!(A, c) ≈ A \ [3.0, -1.0]
+    @test c ≈ A \ [3.0, -1.0]
+    @test @allocated(MTKTearing.numeric_ldiv_again!(A, c)) == 0
+    # also after the fallback for a singular matrix
+    MTKTearing.numeric_ldiv!(copy(S), [1.0, 2.0])
+    @test MTKTearing.numeric_ldiv_again!(S, [3.0, 1.0]) ≈ pinv(S) * [3.0, 1.0]
 end
 
 @testset "Inline linear SCC derivatives stay correct across repeated solves" begin
