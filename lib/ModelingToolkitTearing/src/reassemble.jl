@@ -754,6 +754,28 @@ function solve_into!(cache, A::AbstractMatrix, b::AbstractVector)
     return b
 end
 
+"""
+    $TYPEDSIGNATURES
+
+Solve for another right-hand side `b` with the matrix of the last [`numeric_ldiv!`](@ref),
+reusing its factorization. `b` is overwritten with the solution.
+
+`A` only identifies the cache: its entries are not read. The matrix solved with is whatever
+the last solve of this array type and size on the current task left in the cache, so
+nothing else of that shape may be solved between the `numeric_ldiv!` and this call.
+"""
+function numeric_ldiv_again!(A::AbstractMatrix, b::AbstractVector)
+    return solve_again_into!(get_inline_linsolve_cache(A, b), b)
+end
+
+function solve_again_into!(cache, b::AbstractVector)
+    bwork = cache.b
+    copyto!(bwork, b)
+    cache.b = bwork
+    copyto!(b, CommonSolve.solve!(cache).u)
+    return b
+end
+
 function get_inline_linsolve_cache(A::AbstractMatrix, b::AbstractVector)
     # one typed `Dict` under a `Symbol` key, since a tuple key into task local storage
     # (an `IdDict{Any, Any}`) would be boxed on every call
@@ -772,6 +794,23 @@ end
     cache = CommonSolve.init(LinearProblem(copy(A), copy(b)))
     caches[(typeof(A), size(A))] = cache
     return cache
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Whether the last [`numeric_ldiv!`](@ref) of this array type and size on the current task
+found `A` singular, so that it returned the minimum norm least squares solution instead of
+`A \\ b`.
+
+This reads the flag LinearSolve's default algorithm sets when the LU factorization fails
+and it redoes the solve with a column pivoted QR. The flag is internal to LinearSolve, so
+the answer is `false` whenever it is not there to read.
+"""
+function inline_linsolve_fell_back(A::AbstractMatrix, b::AbstractVector)
+    cacheval = get_inline_linsolve_cache(A, b).cacheval
+    hasfield(typeof(cacheval), :fell_back_to_qr) || return false
+    return getfield(cacheval, :fell_back_to_qr)::Bool
 end
 
 numeric_ldiv!(A, b) = CommonSolve.solve(LinearProblem(A, b)).u
