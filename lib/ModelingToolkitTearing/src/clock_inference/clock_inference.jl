@@ -260,6 +260,14 @@ function (ivc::InferVariableClosure)(var::SymbolicT)
             end
             return
         end
+        # A record variable used as a whole stands for its leaves, as an array does for its
+        # elements
+        if Symbolics.issymstruct(var) end => begin
+            for leaf in collect(Symbolics.SymStruct{SU.symtype(var)}(var))::Vector{SymbolicT}
+                push!(vars_in_parent, leaf)
+            end
+            return
+        end
         _ => return
     end
 
