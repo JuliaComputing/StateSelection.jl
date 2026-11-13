@@ -997,6 +997,14 @@ function collect_vars_to_set!(buffer::Set{SymbolicT}, vars::Vector{SymbolicT})
     end
 end
 
+"""
+    $TYPEDSIGNATURES
+
+Whether an equation with the left-hand side `lhs` can be written as a residual
+`0 ~ rhs - lhs`, i.e. its two sides are numbers.
+"""
+has_residual(lhs::SymbolicT) = SU.symtype(lhs) <: Number
+
 function canonicalize_eq!(param_derivative_map::Dict{SymbolicT, SymbolicT}, no_deriv_params::Set{SymbolicT}, eqs_to_retain::BitVector, ps::Set{SymbolicT}, @nospecialize(iv::Union{Nothing, SymbolicT}), i::Int, eq::Equation)
     is_statemachine_equation = false
     lhs = eq.lhs
@@ -1028,7 +1036,9 @@ function canonicalize_eq!(param_derivative_map::Dict{SymbolicT, SymbolicT}, no_d
             # Skip canonicalization for array-shaped lhs — creating `0 ~ rhs - lhs`
             # would fail with a size mismatch. Array equations are scalarized later by
             # scalarize_tearing_state_eqs!, which applies canonical form to each scalar piece.
-            if isempty(SU.shape(lhs)::SU.ShapeVecT)
+            # An equation between values that are not numbers, such as structs or the
+            # instances of an enumeration, has no residual either, and is kept as written.
+            if isempty(SU.shape(lhs)::SU.ShapeVecT) && has_residual(lhs)
                 eq = Symbolics.COMMON_ZERO ~ (rhs - lhs)
             end
         end
