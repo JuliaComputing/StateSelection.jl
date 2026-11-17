@@ -287,7 +287,8 @@ function (ivc::InferVariableClosure)(var::SymbolicT)
             nested_ivc(v)
         end
 
-        if !SU.isconst(arg)
+        # A time-invariant parameter has no clock and may be read on any clock.
+        if !SU.isconst(arg) && !is_time_invariant_parameter(arg)
             push!(arg_hyperedge, ClockVertex.Expression(arg))
         end
         # NOTE: Ensure all branches here add `arg_hyperedge` to the inference graph. It
@@ -390,6 +391,18 @@ function record_declared_root(x::SymbolicT)::Tuple{SymbolicT, Bool}
         end
         _ => return x, false
     end
+end
+
+"""
+    $TYPEDSIGNATURES
+
+Whether `x` is a parameter that does not vary with time. Excludes `@discretes` (`d(t)`)
+and callable parameter calls (`f(x)`).
+"""
+function is_time_invariant_parameter(x::SymbolicT)
+    MTKBase.isparameter(x) || return false
+    root, _ = record_declared_root(x)
+    return !(SU.iscall(root) && SU.operation(root) isa SymbolicT)
 end
 
 """
