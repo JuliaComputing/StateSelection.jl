@@ -524,6 +524,62 @@ MTKTearing.is_timevarying_operator(::Op3) = true
     @test_throws MTKTearing.ExpectedDiscreteClockPartitionError MTKTearing.infer_clocks!(ci)
 end
 
+@testset "Time-invariant parameter arguments of clock operators are not given a clock" begin
+    @parameters p q[1:2]
+    @discretes d(t)
+    @variables x(t) h(t) y(t)
+    clk1 = Clock(0.1)
+    clk2 = Clock(0.2)
+    clk3 = Clock(0.3)
+    k1 = ShiftIndex(clk1)
+    k2 = ShiftIndex(clk2)
+    k3 = ShiftIndex(clk3)
+
+    for par in (p, q[1], Initial(x))
+        @test MTKTearing.is_time_invariant_parameter(unwrap(par))
+    end
+    for nonpar in (d, x, 2p)
+        @test !MTKTearing.is_time_invariant_parameter(unwrap(nonpar))
+    end
+
+    # The parameter is an argument on `Op1`'s output clock `clk1`, and is also
+    # read on `clk2`.
+    for par in (p, q[1])
+        eqs = [
+            x(k1) ~ 0.5x(k1 - 1)
+            h(k2) ~ 0.5h(k2 - 1) + par
+            y(k1) ~ x(k1) + Op1(h, par)
+        ]
+        @named sys = System(eqs, t, [x, h, y], [p, q])
+        ts = TearingState(sys)
+        ci = MTKTearing.ClockInference(ts)
+        MTKTearing.infer_clocks!(ci)
+        @test !haskey(ci.expression_clocks, unwrap(par))
+        @test ci.expression_clocks[h] == clk2
+        @test ci.var_domain[findfirst(isequal(h), ts.fullvars)] == clk2
+        @test ci.var_domain[findfirst(isequal(Op1(h, par)), ts.fullvars)] == clk1
+    end
+
+    # `p` is an argument of two `Op1`s with outputs on `clk1` and `clk3`.
+    @variables x(t) h(t) z(t)
+    eqs = [
+        x(k1) ~ 0.5x(k1 - 1) + Op1(h, p)
+        h(k2) ~ 0.5h(k2 - 1)
+        z(k3) ~ 0.5z(k3 - 1) + Op1(x, p)
+    ]
+    @named sys = System(eqs, t, [x, h, z], [p])
+    ts = TearingState(sys)
+    ci = MTKTearing.ClockInference(ts)
+    MTKTearing.infer_clocks!(ci)
+    @test !haskey(ci.expression_clocks, p)
+    @test ci.var_domain[findfirst(isequal(x), ts.fullvars)] == clk1
+    @test ci.var_domain[findfirst(isequal(h), ts.fullvars)] == clk2
+    @test ci.var_domain[findfirst(isequal(z), ts.fullvars)] == clk3
+    @test ci.var_domain[findfirst(isequal(Op1(h, p)), ts.fullvars)] == clk1
+    @test ci.var_domain[findfirst(isequal(Op1(x, p)), ts.fullvars)] == clk3
+    @test issetequal(ci.all_clocks, [clk1, clk2, clk3])
+end
+
 @testset "Equation sorting does safe exponentiation" begin
     # https://github.com/SciML/ModelingToolkit.jl/issues/4708
     @variables x(t) y(t)
