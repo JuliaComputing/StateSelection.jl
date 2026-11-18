@@ -733,8 +733,9 @@ same shape. The solution is therefore copied back into `b`, which belongs to thi
 site alone, rather than returning the cache's own buffer.
 """
 function numeric_ldiv!(A::AbstractMatrix, b::AbstractVector)
-    # the lookup is necessarily type unstable, so the solve goes behind a function barrier
-    return solve_into!(get_inline_linsolve_cache(A, b), A, b)
+    # the cache's type is inferred, so asserting it makes the solve a static call
+    C = Base.promote_op(init_inline_linsolve_cache!, InlineLinsolveCachesT, typeof(A), typeof(b))
+    return solve_into!(get_inline_linsolve_cache(A, b)::C, A, b)
 end
 
 function solve_into!(cache, A::AbstractMatrix, b::AbstractVector)
