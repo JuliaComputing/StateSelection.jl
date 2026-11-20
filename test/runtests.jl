@@ -5,6 +5,7 @@ using Test
 
 include("bareiss.jl")
 include("carpanzano_tearing.jl")
+include("dummy_derivative_blocks.jl")
 
 @testset "`get_new_mm`" begin
     mm = SSel.CLIL.SparseMatrixCLIL(
