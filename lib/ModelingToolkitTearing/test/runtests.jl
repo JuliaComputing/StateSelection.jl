@@ -14,6 +14,30 @@ using ForwardDiff
 using LinearAlgebra
 import ModelingToolkitBase as MTKBase
 
+@testset "Inline linear SCCs without an independent variable" begin
+    @variables x y z
+    @parameters a = 2.0 b = 3.0
+    @named sys = System([a*x + y ~ z, x + b*y ~ 1, z^2 ~ 4], nothing)
+    defaults = [x => 0.0, y => 0.0, z => 1.5]
+    alg = ModelingToolkit.SimpleNonlinearSolve.SimpleNewtonRaphson()
+    ref = mtkcompile(sys)
+    @test length(unknowns(ref)) == 2
+    refsol = solve(NonlinearProblem(ref, defaults), alg; abstol = 1.0e-10)
+    @test ModelingToolkit.SciMLBase.successful_retcode(refsol)
+    @test refsol[[x, y, z]] ≈ [1.0, 0.0, 2.0] atol = 1.0e-8
+    for limit in (0, 2)
+        reassemble_alg = MTKTearing.DefaultReassembleAlgorithm(;
+            inline_linear_sccs = true, analytical_linear_scc_limit = limit)
+        # Leave the linear block untorn to exercise both runtime and symbolic solves.
+        ss = mtkcompile(sys; reassemble_alg, max_linear_scc_tearing = 0)
+        @test length(unknowns(ss)) == 1
+        @test length(MTKTearing.inline_linear_systems(ss)) == (limit == 0 ? 1 : 0)
+        sol = solve(NonlinearProblem(ss, defaults), alg; abstol = 1.0e-10)
+        @test ModelingToolkit.SciMLBase.successful_retcode(sol)
+        @test sol[[x, y, z]] ≈ refsol[[x, y, z]] atol = 1.0e-8
+    end
+end
+
 @testset "`InferredDiscrete` validation" begin
     k = ShiftIndex()
     @variables x(t) y(t)
