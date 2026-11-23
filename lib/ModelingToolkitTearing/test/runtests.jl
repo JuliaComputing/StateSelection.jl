@@ -915,3 +915,47 @@ end
     @test unwrap(xd) in vars
     @test !(unwrap(xd(k - 1)) in vars)
 end
+
+struct ClockRecordLeaf
+    x::Real
+    y::Real
+end
+struct ClockRecordNested
+    x::Real
+    f::ClockRecordLeaf
+end
+@symstruct ClockRecordLeaf
+@symstruct ClockRecordNested
+clock_record_leaf_fn(p::ClockRecordLeaf) = p.x + p.y
+clock_record_nested_fn(n::ClockRecordNested) = n.x
+@register_symbolic clock_record_leaf_fn(p::ClockRecordLeaf)
+@register_symbolic clock_record_nested_fn(n::ClockRecordNested)
+
+@testset "A record used whole shares a clock with its projections" begin
+    @variables z(t) zd(t) w1(t) w2(t) p(t)::ClockRecordLeaf n(t)::ClockRecordNested
+    clock = Clock(0.1)
+    function inferred_domains(eqs)
+        @named sys = System(eqs, t)
+        ci = MTKTearing.infer_clocks!(MTKTearing.ClockInference(TearingState(sys)))
+        return Dict(ci.ts.fullvars .=> ci.var_domain)
+    end
+    sampled = [D(z) ~ -z, zd ~ Sample(clock)(z)]
+
+    @testset "leaf" begin
+        domains = inferred_domains([sampled; w1 ~ clock_record_leaf_fn(p) + zd; w2 ~ p.x])
+        @test domains[unwrap(p)] == clock
+        @test domains[unwrap(p.x)] == clock
+        @test domains[unwrap(w2)] == clock
+    end
+    @testset "sub-record" begin
+        domains = inferred_domains(
+            [sampled; w1 ~ clock_record_nested_fn(n) + zd; w2 ~ clock_record_leaf_fn(n.f)])
+        @test domains[unwrap(n)] == clock
+        @test domains[unwrap(n.f)] == clock
+        @test domains[unwrap(w2)] == clock
+    end
+    @testset "sub-record on a conflicting clock" begin
+        @test_throws "multiple associated clocks" inferred_domains(
+            [sampled; w1 ~ clock_record_nested_fn(n) + zd; w2 ~ clock_record_leaf_fn(n.f) + z])
+    end
+end

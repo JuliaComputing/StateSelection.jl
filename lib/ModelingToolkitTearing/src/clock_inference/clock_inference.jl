@@ -260,14 +260,6 @@ function (ivc::InferVariableClosure)(var::SymbolicT)
             end
             return
         end
-        # A record variable used as a whole stands for its leaves, as an array does for its
-        # elements
-        if Symbolics.issymstruct(var) end => begin
-            for leaf in collect(Symbolics.SymStruct{SU.symtype(var)}(var))::Vector{SymbolicT}
-                push!(vars_in_parent, leaf)
-            end
-            return
-        end
         _ => return
     end
 
@@ -472,11 +464,12 @@ function infer_clocks!(ci::ClockInference)
     end
     # Every leaf of one record variable shares a clock: the fields of a record, and the
     # elements of an array of records, all resolve to the same root. A clock reaching any
-    # one of them therefore reaches the rest, and two that disagree are a conflict.
+    # one of them therefore reaches the rest, and two that disagree are a conflict. A
+    # record used whole is its own root, and joins the group of its projections.
     record_group = Dict{SymbolicT, Int}()
     for (i, v) in enumerate(fullvars)
         root, isprojection = record_clock_root(v)
-        isprojection || continue
+        isprojection || Symbolics.issymstruct(v) || continue
         j = get!(record_group, root, i)
         j == i && continue
         add_edge!(inference_graph, (ClockVertex.Variable(i), ClockVertex.Variable(j)))
