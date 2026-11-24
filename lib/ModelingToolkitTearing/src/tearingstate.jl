@@ -997,6 +997,48 @@ function collect_vars_to_set!(buffer::Set{SymbolicT}, vars::Vector{SymbolicT})
     end
 end
 
+"""
+    $TYPEDSIGNATURES
+
+Whether `eq` has a residual `rhs - lhs`. Numbers and arrays of numbers subtract; structs,
+instances of an enumeration and untyped values do not.
+"""
+function has_residual(eq::Equation)
+    return SU._numeric_or_arrnumeric_symtype(eq.lhs) && SU._numeric_or_arrnumeric_symtype(eq.rhs)
+end
+
+"""
+    $TYPEDEF
+
+Thrown when structural simplification needs the residual of an equation that has none.
+"""
+struct NoResidualEquationError <: Exception
+    eq::Equation
+end
+
+function Base.showerror(io::IO, err::NoResidualEquationError)
+    (; eq) = err
+    print(io, """
+    Structural simplification cannot solve the equation
+
+      $eq
+
+    Its sides have types `$(SU.symtype(eq.lhs))` and `$(SU.symtype(eq.rhs))`, and only \
+    numbers have the residual `rhs - lhs` that solving needs. Nonnumeric comparisons \
+    are allowed for observed variables or that are in discrete-time. If this was supposed to \
+    be in discrete time, make sure that it's on a discrete clock.""")
+end
+
+"""
+    $TYPEDSIGNATURES
+
+The residual `rhs - lhs` of `eq`. Throws [`NoResidualEquationError`](@ref) if it has none.
+"""
+function equation_residual(eq::Equation)
+    has_residual(eq) || throw(NoResidualEquationError(eq))
+    return eq.rhs - eq.lhs
+end
+
 function canonicalize_eq!(param_derivative_map::Dict{SymbolicT, SymbolicT}, no_deriv_params::Set{SymbolicT}, eqs_to_retain::BitVector, ps::Set{SymbolicT}, @nospecialize(iv::Union{Nothing, SymbolicT}), i::Int, eq::Equation)
     is_statemachine_equation = false
     lhs = eq.lhs
@@ -1027,8 +1069,10 @@ function canonicalize_eq!(param_derivative_map::Dict{SymbolicT, SymbolicT}, no_d
         _ => begin
             # Skip canonicalization for array-shaped lhs — creating `0 ~ rhs - lhs`
             # would fail with a size mismatch. Array equations are scalarized later by
-            # scalarize_tearing_state_eqs!, which applies canonical form to each scalar piece.
-            if isempty(SU.shape(lhs)::SU.ShapeVecT)
+            # scalarize_tearing_state_eqs!, which splits them into one `lhs ~ rhs` per element.
+            # An equation with a side that is not a number, such as a struct or an instance
+            # of an enumeration, has no residual either, and is kept as written.
+            if isempty(SU.shape(lhs)::SU.ShapeVecT) && has_residual(eq)
                 eq = Symbolics.COMMON_ZERO ~ (rhs - lhs)
             end
         end

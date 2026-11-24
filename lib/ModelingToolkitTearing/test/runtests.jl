@@ -915,3 +915,76 @@ end
     @test unwrap(xd) in vars
     @test !(unwrap(xd(k - 1)) in vars)
 end
+
+struct ClockRecordLeaf
+    x::Real
+    y::Real
+end
+struct ClockRecordNested
+    x::Real
+    f::ClockRecordLeaf
+end
+@symstruct ClockRecordLeaf
+@symstruct ClockRecordNested
+clock_record_leaf_fn(p::ClockRecordLeaf) = p.x + p.y
+clock_record_nested_fn(n::ClockRecordNested) = n.x
+@register_symbolic clock_record_leaf_fn(p::ClockRecordLeaf)
+@register_symbolic clock_record_nested_fn(n::ClockRecordNested)
+
+@testset "A record used whole shares a clock with its projections" begin
+    @variables z(t) zd(t) w1(t) w2(t) p(t)::ClockRecordLeaf n(t)::ClockRecordNested
+    clock = Clock(0.1)
+    function inferred_domains(eqs)
+        @named sys = System(eqs, t)
+        ci = MTKTearing.infer_clocks!(MTKTearing.ClockInference(TearingState(sys)))
+        return Dict(ci.ts.fullvars .=> ci.var_domain)
+    end
+    sampled = [D(z) ~ -z, zd ~ Sample(clock)(z)]
+
+    @testset "leaf" begin
+        domains = inferred_domains([sampled; w1 ~ clock_record_leaf_fn(p) + zd; w2 ~ p.x])
+        @test domains[unwrap(p)] == clock
+        @test domains[unwrap(p.x)] == clock
+        @test domains[unwrap(w2)] == clock
+    end
+    @testset "sub-record" begin
+        domains = inferred_domains(
+            [sampled; w1 ~ clock_record_nested_fn(n) + zd; w2 ~ clock_record_leaf_fn(n.f)])
+        @test domains[unwrap(n)] == clock
+        @test domains[unwrap(n.f)] == clock
+        @test domains[unwrap(w2)] == clock
+    end
+    @testset "sub-record on a conflicting clock" begin
+        @test_throws "multiple associated clocks" inferred_domains(
+            [sampled; w1 ~ clock_record_nested_fn(n) + zd; w2 ~ clock_record_leaf_fn(n.f) + z])
+    end
+end
+
+@enum NoResidualMode NoResidualOff NoResidualOn
+no_residual_pick(x) = x > 0.5 ? NoResidualOn : NoResidualOff
+no_residual_value(m::NoResidualMode) = Float64(Int(m))
+@register_symbolic no_residual_pick(x)::NoResidualMode
+@register_symbolic no_residual_value(m::NoResidualMode)
+
+@testset "Equations without a residual" begin
+    @variables x(t) y(t) m(t)::NoResidualMode n(t)::NoResidualMode a(t)::Any
+
+    @testset "are kept as written" begin
+        @named sys = System([D(x) ~ -x, m ~ no_residual_pick(x), y ~ a, 2y ~ x], t)
+        eqs = equations(TearingState(sys; sort_eqs = false))
+        @test isequal(eqs[2].lhs, unwrap(m))
+        @test isequal(eqs[3].lhs, unwrap(y))
+        @test SU._iszero(eqs[4].lhs)
+    end
+    @testset "compile as explicit assignments" begin
+        @mtkcompile sys = System([D(x) ~ -x, m ~ no_residual_pick(x), n ~ m, a ~ x, y ~ a], t)
+        @test issetequal(unknowns(sys), [x])
+        @test issetequal([eq.lhs for eq in observed(sys)], [m, n, a, y])
+    end
+    @testset "error when they have to be solved" begin
+        @named sys = System([D(x) ~ -no_residual_value(m), m ~ no_residual_pick(x)], t)
+        @test_throws MTKTearing.NoResidualEquationError mtkcompile(sys)
+        @named sys = System([D(x) ~ -y, a ~ x, y ~ a], t)
+        @test_throws MTKTearing.NoResidualEquationError mtkcompile(sys)
+    end
+end

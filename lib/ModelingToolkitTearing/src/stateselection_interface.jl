@@ -94,7 +94,7 @@ function StateSelection.eq_derivative!(ts::TearingState, ieq::Int; kwargs...)
     eq = equations(ts)[ieq]
     eq = Symbolics.COMMON_ZERO ~ substitute(
         Symbolics.derivative(
-            eq.rhs - eq.lhs, MTKBase.get_iv(sys); throw_no_derivative = true), ts.param_derivative_map)
+            equation_residual(eq), MTKBase.get_iv(sys); throw_no_derivative = true), ts.param_derivative_map)
 
     vs = Set{SymbolicT}()
     SU.search_variables!(vs, eq.rhs)
@@ -331,7 +331,7 @@ function StateSelection.find_eq_solvables!(state::TearingState, ieq, to_rm = Int
     (; graph, solvable_graph) = state.structure
 
     eq = equations(state)[ieq]
-    term = unwrap(eq.rhs - eq.lhs)
+    term = unwrap(equation_residual(eq))
     all_int_vars = true
     coeffs === nothing || empty!(coeffs)
     empty!(to_rm)
