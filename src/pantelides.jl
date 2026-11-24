@@ -18,7 +18,7 @@ for every variable, indicating whether it is considered "highest-differentiated"
 `varfilter` is a filter function which takes index of a variable in `structure` and
 determines whether it should be included in the list.
 """
-function computed_highest_diff_variables(structure::SystemStructure, varfilter)
+function computed_highest_diff_variables(structure::SystemStructure, varfilter, present = ())
     (; graph, var_to_diff) = structure
 
     nvars = length(var_to_diff)
@@ -29,7 +29,9 @@ function computed_highest_diff_variables(structure::SystemStructure, varfilter)
             # This variable is structurally highest-differentiated, but may not actually appear in the
             # system (complication 1 above). Ascend the differentiation graph to find the highest
             # differentiated variable that does appear in the system or the alias graph).
-            while isempty(𝑑neighbors(graph, var))
+            # (`present` lists derivatives that count as present although no equation
+            # contains them yet, see `differentiate_preferred!`)
+            while isempty(𝑑neighbors(graph, var)) && !(var in present)
                 var′ = invview(var_to_diff)[var]
                 var′ === nothing && break
                 var = var′
@@ -65,8 +67,11 @@ _canchoose(diffvars::Nothing, var::Integer) = true
     pantelides!(state::TransformationState; kwargs...)
 
 Perform Pantelides algorithm.
+
+`present_vars` lists derivative variables that count as present in the system even though no
+equation contains them yet (see [`differentiate_preferred!`](@ref)).
 """
-function pantelides!(state::TransformationState; finalize = true, maxiters = 8000, eqfilter = eq->true, varfilter = var->true, kw...)
+function pantelides!(state::TransformationState; finalize = true, maxiters = 8000, eqfilter = eq->true, varfilter = var->true, present_vars = (), kw...)
     (; graph, solvable_graph, var_to_diff, eq_to_diff) = state.structure
     neqs = nsrcs(graph)
     nvars = nv(var_to_diff)
@@ -78,7 +83,7 @@ function pantelides!(state::TransformationState; finalize = true, maxiters = 800
         eq -> !isempty(𝑠neighbors(graph, eq)) && eq_to_diff[eq] === nothing && eqfilter(eq),
         1:neqs′)
 
-    varwhitelist = computed_highest_diff_variables(state.structure, varfilter)
+    varwhitelist = computed_highest_diff_variables(state.structure, varfilter, present_vars)
 
     if nnonemptyeqs > count(varwhitelist)
         throw(InvalidSystemException("System is structurally singular"))
