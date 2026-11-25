@@ -174,15 +174,77 @@ function partial_state_selection_graph!(structure::SystemStructure, var_eq_match
     var_eq_matching
 end
 
+"""
+    dummy_derivative_graph!(state::TransformationState, jac = nothing; state_priority = nothing, log = Val(false), preferred_states_threshold = nothing, kwargs...)
+
+Run [`pantelides!`](@ref) on `state` and then select dummy derivatives with
+[`dummy_derivative_graph!(::SystemStructure, var_eq_matching, ...)`](@ref).
+Other keyword arguments are forwarded to [`find_solvables!`](@ref) and [`pantelides!`](@ref).
+
+Keyword arguments:
+- `state_priority`: a function taking the index of a variable and returning its priority.
+  Higher priority variables are more likely to be chosen as states.
+- `preferred_states_threshold`: opt-in, defaults to `nothing` (no change). When set to a
+  number `k` (and `state_priority` is given), every variable with priority `>= k` that is
+  never differentiated gets a derivative before index reduction (see
+  [`differentiate_preferred!`](@ref)), so that it can be chosen as a state. Dummy derivatives
+  are then selected by priority over whole blocks of differentiated equations (see
+  [`priority_dummy_derivatives!`](@ref)) rather than one strongly connected component at a
+  time. Any threshold enables block-level selection for every dynamic system, even if no
+  variable reaches it; ModelingToolkit ignores it for time-independent systems.
+"""
 function dummy_derivative_graph!(state::TransformationState, jac = nothing;
-        state_priority = nothing, log = Val(false), kwargs...)
+        state_priority = nothing, log = Val(false),
+        preferred_states_threshold = nothing, kwargs...)
     state.structure.solvable_graph === nothing && find_solvables!(state; kwargs...)
     complete!(state.structure)
-    var_eq_matching = complete(pantelides!(state; kwargs...))
+    present_vars = ()
+    if preferred_states_threshold !== nothing && state_priority !== nothing
+        added = differentiate_preferred!(state, state_priority, preferred_states_threshold)
+        present_vars = BitSet(state.structure.var_to_diff[v] for v in added)
+    end
+    var_eq_matching = complete(pantelides!(state; present_vars, kwargs...))
     # NOTE: `get_mm` must be queried after `pantelides!`, which extends the
     # linear subsystem matrix with differentiated rows (`eq_derivative!`).
     dummy_derivative_graph!(
-        state.structure, var_eq_matching, jac, state_priority, log; mm = get_mm(state))
+        state.structure, var_eq_matching, jac, state_priority, log; mm = get_mm(state),
+        priority_blocks = preferred_states_threshold !== nothing)
+end
+
+"""
+    differentiate_preferred!(state, state_priority, threshold)
+
+Make every present variable with `state_priority(var) >= threshold` that does not appear
+differentiated a state candidate, by adding its derivative `D(var)` to the structure (as
+`pantelides!` does) before index reduction.
+
+`pantelides!` only differentiates what the structural index needs, so a variable that never
+appears under `D` (a joint rate `w ~ D(phi)` when the body integrates its own velocity, or
+an affine image `sB ~ s - c` of a state) has no derivative and cannot be chosen by the dummy
+derivative pass, whatever its priority. With `D(var)` present, `var` is no longer a highest
+derivative, so the equations that determine it become constraints that `pantelides!`
+differentiates, and the dummy derivative pass picks the states by priority among the old
+and the new candidates (Modelica `stateSelect = prefer` semantics). If `var` is not chosen,
+`D(var)` becomes a dummy derivative (an algebraic unknown).
+
+Returns the list of variables that were given a derivative. No equation contains the new
+derivatives yet, so `pantelides!` must be told to count them as present (`present_vars`).
+"""
+function differentiate_preferred!(state::TransformationState, state_priority, threshold)
+    structure = state.structure
+    (; var_to_diff, graph) = structure
+    diff_to_var = invview(var_to_diff)
+    added = Int[]
+    is_only_discrete(structure) && return added
+    for var in 1:ndsts(graph)
+        var_to_diff[var] === nothing || continue      # already differentiated
+        diff_to_var[var] === nothing || continue      # a derivative itself
+        isempty(𝑑neighbors(graph, var)) && continue  # not in any equation
+        state_priority(var) >= threshold || continue
+        var_derivative!(state, var)
+        push!(added, var)
+    end
+    return added
 end
 
 struct DummyDerivativeSummary
@@ -202,12 +264,16 @@ Perform the dummy derivatives algorithm.
   return `nothing`.
 - `state_priority` is a function taking the index of a variable and returning its
   priority. Higher priority variables are more likely to be chosen as states.
+- `priority_blocks = true` selects the dummy derivatives per block of differentiated
+  equations that share highest derivatives (instead of per strongly connected component of
+  `var_eq_matching`), so that `state_priority` decides across the whole block; see
+  [`priority_dummy_derivatives!`](@ref).
 """
 function dummy_derivative_graph!(
         structure::SystemStructure, var_eq_matching, jac = nothing,
         state_priority = nothing, ::Val{log} = Val(false);
         tearing_alg::TearingAlgorithm = DummyDerivativeTearing(),
-        mm = nothing, kwargs...) where {log}
+        mm = nothing, priority_blocks::Bool = false, kwargs...) where {log}
     (; eq_to_diff, var_to_diff, graph) = structure
     diff_to_eq = invview(eq_to_diff)
     diff_to_var = invview(var_to_diff)
@@ -229,6 +295,13 @@ function dummy_derivative_graph!(
             end
             min_p < 0 ? min_p : max_p
         end
+    end
+    if priority_blocks
+        sp = state_priority === nothing ? (_ -> 0) : extended_sp
+        dummy_derivatives, var_dummy_scc, var_state_priority =
+            priority_dummy_derivatives!(structure, var_eq_matching, jac, sp, cranks)
+        return finish_dummy_derivatives(structure, dummy_derivatives, var_dummy_scc,
+            var_state_priority, tearing_alg, mm)
     end
 
     var_sccs = find_var_sccs(graph, var_eq_matching)
@@ -369,6 +442,13 @@ function dummy_derivative_graph!(
         end
     end
 
+    return finish_dummy_derivatives(structure, dummy_derivatives, var_dummy_scc,
+        var_state_priority, tearing_alg, mm)
+end
+
+function finish_dummy_derivatives(structure, dummy_derivatives, var_dummy_scc,
+        var_state_priority, tearing_alg, mm)
+    diff_to_eq = invview(structure.eq_to_diff)
     if (n_diff_eqs = count(!isnothing, diff_to_eq)) !=
        (n_dummys = length(dummy_derivatives))
         @warn "The number of dummy derivatives ($n_dummys) does not match the number of differentiated equations ($n_diff_eqs)."
@@ -381,6 +461,154 @@ function dummy_derivative_graph!(
     end
     extra = (; extra..., ddsummary = DummyDerivativeSummary(var_dummy_scc, var_state_priority))
     return tearing_result, extra
+end
+
+"""
+    priority_dummy_derivatives!(structure, var_eq_matching, jac, sp, cranks)
+
+Dummy derivative selection (Mattsson & Söderlind) in which `state_priority` decides across
+every differentiated equation that it can influence.
+
+The default pass takes one strongly connected component of the Pantelides matching at a
+time, with the variables of that component as the only candidates. When the model is
+triangular, as a joint `D(s) ~ v` next to a constraint `sB ~ s - c` is, every component
+holds one differentiated equation and one derivative, so the first equation processed
+decides alone: `D(D(s))` becomes a dummy for `D(s) ~ v` before the constraint, where it is
+the low-priority choice, is considered. Priorities can then never reach `sB`.
+
+Here a block is a connected component of the bipartite graph between the highest-order
+differentiated equations and the highest derivatives that occur in them. Within a block the
+candidates are sorted by ascending priority (ties below), and the dummies are a maximal set
+of low-priority candidates that can be matched to the block's equations (by Bareiss on an integer Jacobian when `jac`
+gives one, otherwise structurally by augmenting paths). One level down, the candidates are
+the integrals of the dummies just chosen (as in Mattsson & Söderlind, the variables of the
+selected columns, differentiated once less), and the equations are the integrals of the
+block's equations that are themselves differentiated.
+
+Returns `(dummy_derivatives, blocks, priorities)`.
+"""
+function priority_dummy_derivatives!(structure::SystemStructure, var_eq_matching, jac, sp,
+        cranks)
+    (; eq_to_diff, var_to_diff, graph) = structure
+    diff_to_eq = invview(eq_to_diff)
+    diff_to_var = invview(var_to_diff)
+    invgraph = invview(graph)
+    nvars = ndsts(graph)
+    neqs = nsrcs(graph)
+
+    # highest-order differentiated equations (those matched to a highest derivative)
+    topeqs = Int[]
+    for var in 1:nvars
+        eq = var_eq_matching[var]
+        eq isa Int || continue
+        diff_to_eq[eq] === nothing && continue
+        eq_to_diff[eq] === nothing || continue
+        push!(topeqs, eq)
+    end
+    sort!(unique!(topeqs))
+    iscand(v) = var_to_diff[v] === nothing && diff_to_var[v] !== nothing &&
+                is_present(structure, v)
+
+    # union-find over equations, joined through shared candidate derivatives
+    parent = Dict{Int, Int}(eq => eq for eq in topeqs)
+    function root(x)
+        while parent[x] != x
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        end
+        return x
+    end
+    owner = Dict{Int, Int}()
+    for eq in topeqs, v in 𝑠neighbors(graph, eq)
+        iscand(v) || continue
+        o = get(owner, v, 0)
+        if o == 0
+            owner[v] = eq
+        else
+            ra, rb = root(o), root(eq)
+            ra == rb || (parent[max(ra, rb)] = min(ra, rb))
+        end
+    end
+    blocks = Dict{Int, Vector{Int}}()
+    for eq in topeqs
+        push!(get!(Vector{Int}, blocks, root(eq)), eq)
+    end
+
+    dummy_derivatives = Int[]
+    var_dummy_scc = Vector{Int}[]
+    var_state_priority = Vector{Float64}[]
+    rank_matching = Matching(max(nvars, neqs))
+    eqcolor = falses(neqs)
+    eqs_set = BitSet()
+    for r in sort!(collect(keys(blocks)))
+        eqs = blocks[r]
+        vars = sort!(unique!([v for eq in eqs for v in 𝑠neighbors(graph, eq) if iscand(v)]))
+        isempty(eqs) && continue
+        p = sp.(vars)
+        # Lowest priority first. Among equal priorities, higher-order derivatives first, so
+        # that `D(D(x))` rather than `D(v)` becomes the dummy when `v ~ D(x)` and both are
+        # preferred: the state is then the named variable `v`, not the derivative `D(x)`.
+        order(v) = (n = 0; while (v = diff_to_var[v]) !== nothing; n += 1; end; n)
+        perm = cranks === nothing ? sortperm(collect(zip(p, .-order.(vars), vars))) :
+               sortperm(collect(zip(p, .-order.(vars), @view cranks[vars])))
+        vars = vars[perm]
+        push!(var_dummy_scc, copy(vars))
+        push!(var_state_priority, p[perm])
+        while !isempty(eqs)
+            chosen = Int[]
+            J = jac === nothing ? nothing : block_jacobian(jac, graph, eqs, vars)
+            if J !== nothing && all(x -> isinteger(x) && typemin(Int8) <= x <= typemax(Int8), J)
+                col_order = Int[]
+                N = bareiss.nullspace(Int.(J); col_order)
+                rank = length(col_order) - size(N, 2)
+                append!(chosen, vars[col_order[1:rank]])
+            else
+                empty!(eqs_set)
+                union!(eqs_set, eqs)
+                for var in vars
+                    eqcolor .= false
+                    construct_augmenting_path!(rank_matching, invgraph, var,
+                        Base.Fix2(in, eqs_set), eqcolor) || continue
+                    push!(chosen, var)
+                    length(chosen) == length(eqs) && break
+                end
+                fill!(rank_matching, unassigned)
+            end
+            length(chosen) == length(eqs) || @warn "The DAE system is singular!"
+            append!(dummy_derivatives, chosen)
+            # one level down: integrals of the chosen dummies and of the block's equations,
+            # where those are themselves differentiated (Mattsson & Söderlind)
+            chosen_set = BitSet(chosen)
+            eqs = [diff_to_eq[eq] for eq in eqs
+                   if diff_to_eq[diff_to_eq[eq]] !== nothing]
+            vars = [diff_to_var[v] for v in vars
+                    if v in chosen_set && diff_to_var[diff_to_var[v]] !== nothing]
+        end
+    end
+    return dummy_derivatives, var_dummy_scc, var_state_priority
+end
+
+"""
+    block_jacobian(jac, graph, eqs, vars)
+
+`jac(eqs, vars)` for a whole priority block, built one equation at a time over the
+candidates incident on it in `graph` (the others are structural zeros). Returns `nothing` at
+the first row `jac` rejects, so a nonlinear block costs only the derivatives up to that row
+instead of |eqs| x |vars| symbolic derivatives.
+"""
+function block_jacobian(jac, graph, eqs, vars)
+    col = Dict{Int, Int}(v => j for (j, v) in enumerate(vars))
+    J = zeros(Int, length(eqs), length(vars))
+    for (i, eq) in enumerate(eqs)
+        cols = Int[v for v in 𝑠neighbors(graph, eq) if haskey(col, v)]
+        isempty(cols) && continue
+        Jr = jac([eq], cols)
+        Jr === nothing && return nothing
+        for (k, v) in enumerate(cols)
+            J[i, col[v]] = Jr[1, k]
+        end
+    end
+    return J
 end
 
 function is_present(structure, v)::Bool
