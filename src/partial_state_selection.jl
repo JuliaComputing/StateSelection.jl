@@ -190,7 +190,8 @@ Keyword arguments:
   [`differentiate_preferred!`](@ref)), so that it can be chosen as a state. Dummy derivatives
   are then selected by priority over whole blocks of differentiated equations (see
   [`priority_dummy_derivatives!`](@ref)) rather than one strongly connected component at a
-  time.
+  time. Any threshold enables block-level selection for every dynamic system, even if no
+  variable reaches it; ModelingToolkit ignores it for time-independent systems.
 """
 function dummy_derivative_graph!(state::TransformationState, jac = nothing;
         state_priority = nothing, log = Val(false),
@@ -555,7 +556,7 @@ function priority_dummy_derivatives!(structure::SystemStructure, var_eq_matching
         push!(var_state_priority, p[perm])
         while !isempty(eqs)
             chosen = Int[]
-            J = jac === nothing ? nothing : jac(eqs, vars)
+            J = jac === nothing ? nothing : block_jacobian(jac, graph, eqs, vars)
             if J !== nothing && all(x -> isinteger(x) && typemin(Int8) <= x <= typemax(Int8), J)
                 col_order = Int[]
                 N = bareiss.nullspace(Int.(J); col_order)
@@ -585,6 +586,29 @@ function priority_dummy_derivatives!(structure::SystemStructure, var_eq_matching
         end
     end
     return dummy_derivatives, var_dummy_scc, var_state_priority
+end
+
+"""
+    block_jacobian(jac, graph, eqs, vars)
+
+`jac(eqs, vars)` for a whole priority block, built one equation at a time over the
+candidates incident on it in `graph` (the others are structural zeros). Returns `nothing` at
+the first row `jac` rejects, so a nonlinear block costs only the derivatives up to that row
+instead of |eqs| x |vars| symbolic derivatives.
+"""
+function block_jacobian(jac, graph, eqs, vars)
+    col = Dict{Int, Int}(v => j for (j, v) in enumerate(vars))
+    J = zeros(Int, length(eqs), length(vars))
+    for (i, eq) in enumerate(eqs)
+        cols = Int[v for v in 𝑠neighbors(graph, eq) if haskey(col, v)]
+        isempty(cols) && continue
+        Jr = jac([eq], cols)
+        Jr === nothing && return nothing
+        for (k, v) in enumerate(cols)
+            J[i, col[v]] = Jr[1, k]
+        end
+    end
+    return J
 end
 
 function is_present(structure, v)::Bool
