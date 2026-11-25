@@ -17,24 +17,30 @@ import ModelingToolkitBase as MTKBase
 @testset "Inline linear SCCs without an independent variable" begin
     @variables x y z
     @parameters a = 2.0 b = 3.0
-    @named sys = System([a*x + y ~ z, x + b*y ~ 1, z^2 ~ 4], nothing)
     defaults = [x => 0.0, y => 0.0, z => 1.5]
     alg = ModelingToolkit.SimpleNonlinearSolve.SimpleNewtonRaphson()
-    ref = mtkcompile(sys)
-    @test length(unknowns(ref)) == 2
-    refsol = solve(NonlinearProblem(ref, defaults), alg; abstol = 1.0e-10)
-    @test ModelingToolkit.SciMLBase.successful_retcode(refsol)
-    @test refsol[[x, y, z]] ≈ [1.0, 0.0, 2.0] atol = 1.0e-8
-    for limit in (0, 2)
-        reassemble_alg = MTKTearing.DefaultReassembleAlgorithm(;
-            inline_linear_sccs = true, analytical_linear_scc_limit = limit)
-        # Leave the linear block untorn to exercise both runtime and symbolic solves.
-        ss = mtkcompile(sys; reassemble_alg, max_linear_scc_tearing = 0)
-        @test length(unknowns(ss)) == 1
-        @test length(MTKTearing.inline_linear_systems(ss)) == (limit == 0 ? 1 : 0)
-        sol = solve(NonlinearProblem(ss, defaults), alg; abstol = 1.0e-10)
-        @test ModelingToolkit.SciMLBase.successful_retcode(sol)
-        @test sol[[x, y, z]] ≈ refsol[[x, y, z]] atol = 1.0e-8
+    # Each case is `(sys, expected x/y/z, number of runtime `A \ b` blocks)`. In
+    # `runtime`, every coefficient of the linear block in `x, y` depends on the unknown
+    # `z`, so tearing cannot solve the block and it is always solved at runtime. The
+    # parameter coefficients of `symbolic` let the block be solved symbolically. Neither
+    # case depends on how a given ModelingToolkit version tears linear blocks.
+    @named runtime = System([z*x + (z + 1)*y ~ 1, (z - 1)*x + z*y ~ 0, z^2 ~ 4], nothing)
+    @named symbolic = System([a*x + y ~ z, x + b*y ~ 1, z^2 ~ 4], nothing)
+    for (sys, expected, nblocks) in ((runtime, [2.0, -1.0, 2.0], 1),
+                                     (symbolic, [1.0, 0.0, 2.0], 0))
+        refsol = solve(NonlinearProblem(mtkcompile(sys), defaults), alg; abstol = 1.0e-10)
+        @test ModelingToolkit.SciMLBase.successful_retcode(refsol)
+        @test refsol[[x, y, z]] ≈ expected atol = 1.0e-8
+        for limit in (0, 2)
+            reassemble_alg = MTKTearing.DefaultReassembleAlgorithm(;
+                inline_linear_sccs = true, analytical_linear_scc_limit = limit)
+            ss = mtkcompile(sys; reassemble_alg)
+            @test isequal(unknowns(ss), [z])
+            @test length(MTKTearing.inline_linear_systems(ss)) == nblocks
+            sol = solve(NonlinearProblem(ss, defaults), alg; abstol = 1.0e-10)
+            @test ModelingToolkit.SciMLBase.successful_retcode(sol)
+            @test sol[[x, y, z]] ≈ expected atol = 1.0e-8
+        end
     end
 end
 
