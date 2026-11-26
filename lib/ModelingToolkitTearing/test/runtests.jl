@@ -411,6 +411,19 @@ end
     @test length(unknowns(compiled)) == length(equations(compiled))
 end
 
+@testset "`preferred_states_threshold` makes preferred variables states" begin
+    # `sB` is an offset copy of the state `s` and is never differentiated itself, so
+    # by default `s` and `v` are chosen whatever the priorities of `sB` and `vB`.
+    @variables s(t) v(t) a(t) sB(t) [state_priority = 10] vB(t) [state_priority = 10]
+    @parameters c = 1.0 k = 2.0
+    eqs = [D(s) ~ v, D(v) ~ a, a ~ -k * s, sB ~ s - c, vB ~ D(sB)]
+    @named sys = System(eqs, t)
+    states(csys) = Set(u for (u, eq) in zip(unknowns(csys), equations(csys))
+                       if ModelingToolkit.isdiffeq(eq))
+    @test issetequal(states(mtkcompile(sys)), [s, v])
+    @test issetequal(states(mtkcompile(sys; preferred_states_threshold = 10)), [sB, vB])
+end
+
 @testset "`rm_eqs_vars!` does not require calling `complete`" begin
     @variables x(t) y(t)
     @named sys = System([D(x) ~ 2x + 1, D(y) ~ 2y + 1], t)
