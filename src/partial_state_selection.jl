@@ -332,6 +332,15 @@ function dummy_derivative_graph!(
             end
             (diff_to_var[var] !== nothing && is_present(structure, var)) && push!(vars, var)
         end
+        # Candidates are every highest-order derivative in the differentiated equations, not only
+        # those Pantelides' matching put in this SCC: a derivative already matched to its own
+        # explicit equation (`D(s) ~ v` of a joint) must still be eligible as a dummy, or
+        # `state_priority` cannot prefer another variable of the constraint (`sB ~ s - c`).
+        for eq in eqs, v in 𝑠neighbors(graph, eq)
+            (v in vars || v in dummy_derivatives) && continue
+            var_to_diff[v] === nothing && diff_to_var[v] !== nothing && is_present(structure, v) || continue
+            push!(vars, v)
+        end
         isempty(eqs) && continue
 
         rank_matching = Matching(max(nvars, neqs))
