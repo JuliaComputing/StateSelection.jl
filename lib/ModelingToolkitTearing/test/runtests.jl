@@ -308,6 +308,41 @@ end
     @test du[1] ≈ refdu[1]
 end
 
+@testset "Inline linear SCCs whose right-hand sides CSE to one buffer" begin
+    # Both SCCs have the right-hand side `[x, x]`, so CSE fills one `b` buffer and passes
+    # it to both solves. The first solve must not leave its solution in that buffer.
+    @variables x(t) y(t) z(t) u(t) v(t)
+    @parameters k = 2.0
+    eqs = [
+        D(x) ~ -x + y + z + 2u - v,
+        0 ~ (k + x^2) * y + (1 + x^2) * z - x,
+        0 ~ (1 + x^2) * y - (3 + x^2) * z - x,
+        0 ~ (5 + x^2) * u + (2 + x^2) * v - x,
+        0 ~ (1 - x^2) * u - (4 + x^2) * v - x,
+    ]
+    reassemble_alg = MTKTearing.DefaultReassembleAlgorithm(;
+        inline_linear_sccs = true, analytical_linear_scc_limit = 1)
+    @mtkcompile sys = System(eqs, t) reassemble_alg = reassemble_alg
+    @test length(MTKTearing.inline_linear_systems(sys)) == 2
+    prob = ODEProblem(sys, [x => 0.5], (0.0, 1.0))
+    rhs(xv) = (du = [zero(xv)]; prob.f.f(du, [xv], prob.p, 0.0); du[1])
+    function ref(xv)
+        yz = [2 + xv^2 1 + xv^2; 1 + xv^2 -3 - xv^2] \ [xv, xv]
+        uv = [5 + xv^2 2 + xv^2; 1 - xv^2 -4 - xv^2] \ [xv, xv]
+        return -xv + yz[1] + yz[2] + 2uv[1] - uv[2]
+    end
+    for xv in (0.5, 1.3)
+        @test rhs(xv) ≈ ref(xv)
+        @test ForwardDiff.derivative(rhs, xv) ≈ ForwardDiff.derivative(ref, xv)
+    end
+
+    # the generated code calls `safe_ldiv`, which must leave both of its arguments alone
+    A, b = [2.0 1.0; 1.0 3.0], [1.0, 2.0]
+    @test MTKTearing.safe_ldiv(A, b) ≈ [2.0 1.0; 1.0 3.0] \ [1.0, 2.0]
+    @test A == [2.0 1.0; 1.0 3.0]
+    @test b == [1.0, 2.0]
+end
+
 include("enzyme.jl")
 
 @testset "`inline_linear_systems` diagnostic" begin

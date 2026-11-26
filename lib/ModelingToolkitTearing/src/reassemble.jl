@@ -712,7 +712,11 @@ function safe_ldiv(A, b)
             shape = SU.promote_shape(safe_ldiv, SU.shape(A), SU.shape(b))
         )
     end
-    return numeric_ldiv!(A, b)
+    # CSE can hand the same `b` buffer to several solves: two SCCs whose right-hand sides
+    # are equal share one. `numeric_ldiv!` writes its solution into `b`, so solve a copy,
+    # or every later solve on the buffer reads this solution as its right-hand side. `A`
+    # needs no copy, since `numeric_ldiv!` only reads it.
+    return numeric_ldiv!(A, copy(b))
 end
 
 """
@@ -729,8 +733,9 @@ The cache is task local because the emitted expression is shared by every proble
 from it, while `A` and `b` are not.
 
 One cache is kept per array type and size, so a solve site can share with another of the
-same shape. The solution is therefore copied back into `b`, which belongs to this solve
-site alone, rather than returning the cache's own buffer.
+same shape. The solution is therefore copied back into `b` rather than returned in the
+cache's own buffer. `A` is only read. The emitted code can share `b` between solve sites,
+so [`safe_ldiv`](@ref) passes a copy.
 """
 function numeric_ldiv!(A::AbstractMatrix, b::AbstractVector)
     # the lookup is necessarily type unstable, so the solve goes behind a function barrier
