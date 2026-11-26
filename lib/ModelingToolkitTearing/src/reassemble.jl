@@ -781,18 +781,24 @@ function get_inline_linsolve_cache(A::AbstractMatrix, b::AbstractVector)
     # (an `IdDict{Any, Any}`) would be boxed on every call
     caches = get!(InlineLinsolveCachesT, task_local_storage(),
         INLINE_LINSOLVE_CACHE)::InlineLinsolveCachesT
-    cache = get(caches, (typeof(A), size(A)), nothing)
-    return cache === nothing ? init_inline_linsolve_cache!(caches, A, b) : cache
+    cache = get(caches, (typeof(A), typeof(b), size(A)), nothing)
+    cache === nothing && return init_inline_linsolve_cache!(caches, A, b)
+    # The `Dict` holds caches of every array type, so its values are untyped. Asserting the
+    # type a new cache infers to lets the solve after this dispatch statically, which
+    # `juliac --trim` needs. The key includes both array types, so the assertion holds.
+    return cache::Base.promote_op(new_inline_linsolve_cache, typeof(A), typeof(b))
 end
+
+# `A` and `b` are views into the diffcache buffers of whichever problem happens to call
+# first, and the cache keeps what it is handed, so it needs copies it owns. `copy` rather
+# than `Matrix`/`Vector` so the cache keeps the array type it was given, which matters for
+# anything living off the CPU.
+new_inline_linsolve_cache(A, b) = CommonSolve.init(LinearProblem(copy(A), copy(b)))
 
 # out of line, since inlined it slows every inline solve by ~25 ns on Julia 1.13
 @noinline function init_inline_linsolve_cache!(caches, A::AbstractMatrix, b::AbstractVector)
-    # `A` and `b` are views into the diffcache buffers of whichever problem happens
-    # to call first, and the cache keeps what it is handed, so it needs copies it owns.
-    # `copy` rather than `Matrix`/`Vector` so the cache keeps the array type it was
-    # given, which matters for anything living off the CPU.
-    cache = CommonSolve.init(LinearProblem(copy(A), copy(b)))
-    caches[(typeof(A), size(A))] = cache
+    cache = new_inline_linsolve_cache(A, b)
+    caches[(typeof(A), typeof(b), size(A))] = cache
     return cache
 end
 
@@ -836,7 +842,7 @@ Key of this package's entry in task local storage, which holds the `LinearCache`
 """
 const INLINE_LINSOLVE_CACHE = :ModelingToolkitTearing_inline_linsolve_cache
 
-const InlineLinsolveCachesT = Dict{Tuple{DataType, Dims{2}}, Any}
+const InlineLinsolveCachesT = Dict{Tuple{DataType, DataType, Dims{2}}, Any}
 
 """
     $TYPEDSIGNATURES
