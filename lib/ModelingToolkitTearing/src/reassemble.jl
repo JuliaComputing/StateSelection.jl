@@ -861,7 +861,6 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
     (; fullvars, sys, structure) = state
     (; graph, solvable_graph, var_to_diff) = structure
     diff_to_var = invview(var_to_diff)
-    D = Differential(MTKBase.get_iv(sys)::SymbolicT)
 
     # If the SCC is fully torn, don't bother generating a linsolve
     all_torn = true
@@ -900,6 +899,7 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
         isdervar = StateSelection.isdervar(state.structure, ivar)
         isdervar || continue
         order, lv = var_order(ivar, diff_to_var)
+        D = Differential(MTKBase.get_iv(sys)::SymbolicT)
         vars[i] = D(fullvars[lv])
     end
 
@@ -1019,7 +1019,11 @@ function get_linear_scc_linsol(state::TearingState, alg_eqs::Vector{Int},
     A = SU.ArrayMaker{VartypeT}(A_regions, A_values; shape = SU.ShapeVecT((1:N, 1:N)))
     b = SU.ArrayMaker{VartypeT}(b_regions, b_values; shape = SU.ShapeVecT((1:N,)))
 
-    reference_args = Symbolics.SArgsT((reference, MTKBase.get_iv(sys)::SymbolicT))
+    reference_args = Symbolics.SArgsT((reference,))
+    iv = MTKBase.get_iv(sys)
+    if iv !== nothing
+        push!(reference_args, iv)
+    end
     inps = MTKBase.inputs(sys)
     if !isempty(inps)
         push!(reference_args, first(inps))
@@ -1657,10 +1661,8 @@ function (alg::DefaultReassembleAlgorithm)(state::TearingState,
     else
         iv = D = nothing
     end
-    # `iv === nothing` implies a nonlinear system. `SCCNonlinearProblem` should be
-    # used instead of this pass. `D isa Shift` implies a discrete system, which currently
-    # doesn't support inline linear SCCs.
-    if iv === nothing || D isa Shift
+    # Discrete systems do not support inline linear SCCs.
+    if D isa Shift
         inline_linear_sccs = false
     end
 
